@@ -1,0 +1,22 @@
+{
+  "name": "gmail-cleaner",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Client-side-only React SPA that talks to the Gmail REST API directly from the browser, stores message metadata in IndexedDB, and ranks senders by total email size with a one-click Move to Trash action.",
+  "scripts": {
+    "start": "vite --port 5500",
+    "dev": "vite --port 5500",
+    "build": "vite build",
+    "preview": "vite preview --port 5500"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.0.3",
+    "vite": "^8.1.3"
+  }
+}
