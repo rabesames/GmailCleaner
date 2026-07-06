@@ -12,6 +12,9 @@ sessions (so you're not re-syncing your whole inbox every time you open
 the app); your OAuth Client ID and access token remain intentionally
 ephemeral — see [Notes and limitations](#notes-and-limitations).
 
+Note: This is currently published at https://gmail-cleaner.abesames.org/ - fully usable, all data remains on the user's side 
+
+
 ## One-time Google Cloud setup
 
 Gmail's REST API is the only way for a browser page to touch Gmail

@@ -12,8 +12,10 @@ function formatSize(bytes) {
   return `${value.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
+// Unlike the identically-named helper in SyncControls.jsx, this one is only
+// ever called from inside a truthy-date check (see the hover-preview title
+// below), so it never needs to handle a missing date itself.
 function formatDate(iso) {
-  if (!iso) return 'never';
   return new Date(iso).toLocaleString();
 }
 
@@ -48,12 +50,12 @@ function parseSizeFilter(raw) {
 // descending), since that's the underlying natural order getTopSenders()
 // already returns.
 function cycleSortState(prev, column) {
-  if (prev.column === column) {
-    if (prev.direction === 'asc') return { column, direction: 'desc' };
-    if (prev.direction === 'desc') return { column: null, direction: null };
-    return { column, direction: 'asc' };
-  }
-  return { column, direction: 'asc' };
+  // Reaching "unsorted" always clears `column` to null (below), so whenever
+  // prev.column matches the clicked column, prev.direction can only ever be
+  // 'asc' or 'desc' -- there's no third case to handle here.
+  if (prev.column !== column) return { column, direction: 'asc' };
+  if (prev.direction === 'asc') return { column, direction: 'desc' };
+  return { column: null, direction: null };
 }
 
 function sortIndicator(sortState, column) {
