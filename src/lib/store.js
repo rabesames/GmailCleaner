@@ -6,10 +6,16 @@
 // stored) and the access token (sessionStorage, short-lived and revocable)
 // remain exactly as ephemeral as before. There is still no server.
 const DB_NAME = 'gmailCleaner';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const MESSAGES_STORE = 'messages';
 const META_STORE = 'meta';
 const IGNORED_STORE = 'ignoredSenders';
+// v3 additions, all keyed by email/id presence alone (like IGNORED_STORE) --
+// standing facts that, like ignoredSenders, deliberately survive
+// clearAllData() (see the comment there) rather than being sync progress.
+const CONTACTED_STORE = 'contactedAddresses'; // every address ever sent-TO/CC'd, from scanning Sent mail
+const TRASHED_STORE = 'trashedSenders'; // senders manually Move-to-Trash'd via this app, permanent record
+const SCANNED_SENT_STORE = 'scannedSentIds'; // Sent message ids already scanned, so a re-sync never re-fetches them
 
 let dbPromise = null;
 
@@ -27,6 +33,15 @@ function openDb() {
         }
         if (!db.objectStoreNames.contains(IGNORED_STORE)) {
           db.createObjectStore(IGNORED_STORE, { keyPath: 'email' });
+        }
+        if (!db.objectStoreNames.contains(CONTACTED_STORE)) {
+          db.createObjectStore(CONTACTED_STORE, { keyPath: 'email' });
+        }
+        if (!db.objectStoreNames.contains(TRASHED_STORE)) {
+          db.createObjectStore(TRASHED_STORE, { keyPath: 'email' });
+        }
+        if (!db.objectStoreNames.contains(SCANNED_SENT_STORE)) {
+          db.createObjectStore(SCANNED_SENT_STORE, { keyPath: 'id' });
         }
       };
       request.onsuccess = () => resolve(request.result);
@@ -102,9 +117,12 @@ export async function setLastSyncedAt(iso) {
 }
 
 // "Clear Data" wipes synced mail and the last-synced marker so the next
-// sync starts from scratch, but deliberately leaves ignoredSenders alone
-// -- ignoring a sender is a lasting preference, not sync progress, and
-// should survive a reset (otherwise it'd reappear on the very next sync).
+// sync starts from scratch, but deliberately leaves ignoredSenders (and the
+// v3 stores: contactedAddresses, trashedSenders, scannedSentIds) alone --
+// all four are lasting facts/preferences, not sync progress, and should
+// survive a reset. Wiping contactedAddresses/scannedSentIds in particular
+// would force an expensive full Sent-folder rescan even though "did I ever
+// email X" never goes stale once true.
 export async function clearAllData() {
   await withStore(MESSAGES_STORE, 'readwrite', (store) => store.clear());
   await withStore(META_STORE, 'readwrite', (store) => store.clear());
@@ -120,6 +138,47 @@ export async function unignoreSender(email) {
 
 export async function getIgnoredSenders() {
   const rows = await withStore(IGNORED_STORE, 'readonly', (store) => promisifyRequest(store.getAll()));
+  return rows.map((row) => row.email);
+}
+
+export async function addContactedAddresses(emails) {
+  return withStore(CONTACTED_STORE, 'readwrite', (store) => {
+    for (const email of emails) store.put({ email });
+  });
+}
+
+export async function getContactedAddresses() {
+  const rows = await withStore(CONTACTED_STORE, 'readonly', (store) => promisifyRequest(store.getAll()));
+  return rows.map((row) => row.email);
+}
+
+async function markSentScanned(id) {
+  return withStore(SCANNED_SENT_STORE, 'readwrite', (store) => store.put({ id }));
+}
+
+export async function getScannedSentIds() {
+  const rows = await withStore(SCANNED_SENT_STORE, 'readonly', (store) => promisifyRequest(store.getAll()));
+  return rows.map((row) => row.id);
+}
+
+// Called once per fetched Sent message by sync.js's Sent-phase worker.
+// Addresses are recorded before the id is marked scanned -- if a job gets
+// superseded between the two writes, the worst case is a harmless re-scan
+// of this id next time, never a silently lost "did I ever email X" fact.
+export async function recordSentMessageRecipients({ id, to, cc }) {
+  const addresses = new Set([...parseAddressListHeader(to), ...parseAddressListHeader(cc)]);
+  if (addresses.size) await addContactedAddresses([...addresses]);
+  await markSentScanned(id);
+}
+
+export async function recordTrashedSenders(emails) {
+  return withStore(TRASHED_STORE, 'readwrite', (store) => {
+    for (const email of emails) store.put({ email });
+  });
+}
+
+export async function getTrashedSenders() {
+  const rows = await withStore(TRASHED_STORE, 'readonly', (store) => promisifyRequest(store.getAll()));
   return rows.map((row) => row.email);
 }
 
@@ -186,14 +245,40 @@ function parseFromHeader(value) {
   return { name: decoded.trim() || null, email: null };
 }
 
-export async function getTopSenders() {
-  const [messages, ignoredEmails] = await Promise.all([getAllMessages(), getIgnoredSenders()]);
-  const ignoredSet = new Set(ignoredEmails);
+// To/Cc headers can carry several comma-separated addresses, unlike the
+// single-address From header -- and a quoted display name can itself
+// contain a literal comma ("Doe, Jane" <jane@x.com>, john@y.com), so a
+// naive split(',') would break on that. Reuses parseFromHeader per token
+// rather than duplicating its angle-bracket/RFC-2047 decoding logic.
+export function parseAddressListHeader(raw) {
+  if (!raw) return [];
+  const parts = [];
+  let current = '';
+  let inQuotes = false;
+  for (const ch of raw) {
+    if (ch === '"') inQuotes = !inQuotes;
+    if (ch === ',' && !inQuotes) {
+      parts.push(current);
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  if (current.trim()) parts.push(current);
+  return parts.map((part) => parseFromHeader(part).email).filter(Boolean);
+}
+
+// Shared per-sender grouping used by both getTopSenders() and
+// getCleanupSuggestions() -- `excludeEmails` (ignoredSenders) is skipped up
+// front rather than filtered from the finished result, same rationale as
+// before: cheaper, and an excluded sender's rows never get a
+// latestMessage/ids computed at all.
+function aggregateBySender(messages, excludeEmails) {
   const bySender = new Map();
   for (const m of messages) {
     if (m.deleted) continue;
     const { name, email } = parseFromHeader(m.from);
-    if (!email || ignoredSet.has(email)) continue;
+    if (!email || excludeEmails.has(email)) continue;
     const entry =
       bySender.get(email) ||
       { email, name: null, messageCount: 0, totalSize: 0, ids: [], latestMessage: null, latestTimestamp: -Infinity };
@@ -217,5 +302,42 @@ export async function getTopSenders() {
 
     bySender.set(email, entry);
   }
+  return bySender;
+}
+
+export async function getTopSenders() {
+  const [messages, ignoredEmails] = await Promise.all([getAllMessages(), getIgnoredSenders()]);
+  const bySender = aggregateBySender(messages, new Set(ignoredEmails));
   return [...bySender.values()].sort((a, b) => b.totalSize - a.totalSize);
+}
+
+const MS_PER_YEAR = 365.25 * 24 * 60 * 60 * 1000;
+
+// Cleanup Suggestions = senders the user has never emailed/replied to (not
+// in contactedAddresses) whose most recent message is older than
+// thresholdYears, OR any sender previously Move-to-Trash'd via this app
+// before (trashedSenders) regardless of age/contact -- once the user has
+// demonstrated "this sender is trash-worthy," that judgment should keep
+// surfacing them if they email again, without waiting years. A sender with
+// no parseable date anywhere (latestTimestamp === -Infinity) counts as
+// stale, same "fail toward surfacing a candidate" choice as elsewhere in
+// this codebase's permissive-parsing conventions. Always a subset of
+// getTopSenders() -- same aggregation + ignored-exclusion, extra filter --
+// so a sender with zero active messages (fully trashed, nothing new since)
+// correctly drops out here too, even if still in trashedSenders.
+export async function getCleanupSuggestions(thresholdYears) {
+  const [messages, ignoredEmails, contactedEmails, trashedEmails] = await Promise.all([
+    getAllMessages(),
+    getIgnoredSenders(),
+    getContactedAddresses(),
+    getTrashedSenders(),
+  ]);
+  const bySender = aggregateBySender(messages, new Set(ignoredEmails));
+  const contactedSet = new Set(contactedEmails);
+  const trashedSet = new Set(trashedEmails);
+  const cutoff = Date.now() - thresholdYears * MS_PER_YEAR;
+
+  return [...bySender.values()]
+    .filter((entry) => (!contactedSet.has(entry.email) && entry.latestTimestamp < cutoff) || trashedSet.has(entry.email))
+    .sort((a, b) => b.totalSize - a.totalSize);
 }

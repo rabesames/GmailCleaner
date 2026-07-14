@@ -3,16 +3,26 @@ function formatDate(iso) {
   return new Date(iso).toLocaleString();
 }
 
+// A sync job runs two sequential phases (inbox, then a Sent-mail scan for
+// Cleanup Suggestions -- see sync.js); `phase` is undefined on every
+// snapshot from before that existed, which deliberately falls through to
+// `isSent = false` below so old callers/tests see the exact same text.
 function statusText(snapshot) {
+  const isSent = snapshot.phase === 'sent';
+  const verb = isSent ? 'Scanning sent mail' : 'Syncing';
+  const listingTarget = isSent ? 'sent mail' : 'inbox';
   switch (snapshot.status) {
     case 'running': {
-      // Listing and fetching run concurrently now, so there's one combined
-      // line rather than a "listing" vs "fetching" phase distinction.
-      const listingNote = snapshot.listingDone ? '' : ` (${snapshot.listedCount} listed so far, still listing inbox)`;
-      return `Syncing... ${snapshot.fetched}/${snapshot.total} synced${listingNote}`;
+      // Listing and fetching run concurrently within a phase, so there's
+      // one combined line rather than a separate "listing" vs "fetching"
+      // distinction.
+      const listingNote = snapshot.listingDone ? '' : ` (${snapshot.listedCount} listed so far, still listing ${listingTarget})`;
+      return `${verb}... ${snapshot.fetched}/${snapshot.total} synced${listingNote}`;
     }
     case 'paused':
-      return `Paused at ${snapshot.fetched}/${snapshot.total}`;
+      return isSent
+        ? `Paused scanning sent mail at ${snapshot.fetched}/${snapshot.total}`
+        : `Paused at ${snapshot.fetched}/${snapshot.total}`;
     case 'error':
       return `Sync error: ${snapshot.error}`;
     default:

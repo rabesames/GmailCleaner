@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, act } from '@testing-library/react';
+import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 vi.mock('./lib/auth.js', () => ({
@@ -12,11 +12,13 @@ vi.mock('./lib/auth.js', () => ({
 
 vi.mock('./lib/store.js', () => ({
   getTopSenders: vi.fn().mockResolvedValue([]),
+  getCleanupSuggestions: vi.fn().mockResolvedValue([]),
   getLastSyncedAt: vi.fn().mockResolvedValue(null),
   getIgnoredSenders: vi.fn().mockResolvedValue([]),
   ignoreSender: vi.fn().mockResolvedValue(undefined),
   unignoreSender: vi.fn().mockResolvedValue(undefined),
   markGone: vi.fn().mockResolvedValue(undefined),
+  recordTrashedSenders: vi.fn().mockResolvedValue(undefined),
   clearAllData: vi.fn().mockResolvedValue(undefined),
 }));
 
@@ -33,7 +35,17 @@ vi.mock('./lib/gmailApi.js', () => ({
 }));
 
 import { setCurrentClientId, getStoredClientId, isSignedIn, signOut, getAccessToken } from './lib/auth.js';
-import { getTopSenders, getLastSyncedAt, getIgnoredSenders, ignoreSender, unignoreSender, markGone, clearAllData } from './lib/store.js';
+import {
+  getTopSenders,
+  getCleanupSuggestions,
+  getLastSyncedAt,
+  getIgnoredSenders,
+  ignoreSender,
+  unignoreSender,
+  markGone,
+  recordTrashedSenders,
+  clearAllData,
+} from './lib/store.js';
 import { startSync, pauseSync, resumeSync, resetSync, getSyncSnapshot } from './lib/sync.js';
 import { trashMessages } from './lib/gmailApi.js';
 import App from './App.jsx';
@@ -44,10 +56,12 @@ function sender(overrides = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.clear();
   getStoredClientId.mockReturnValue('');
   isSignedIn.mockReturnValue(false);
   getSyncSnapshot.mockReturnValue({ status: 'idle' });
   getTopSenders.mockResolvedValue([]);
+  getCleanupSuggestions.mockResolvedValue([]);
   getLastSyncedAt.mockResolvedValue(null);
   getIgnoredSenders.mockResolvedValue([]);
   getAccessToken.mockResolvedValue('token');
@@ -133,12 +147,18 @@ describe('sync controls', () => {
 
     const onUpdate = startSync.mock.calls[0][0];
     getTopSenders.mockResolvedValue([sender({ email: 'fresh@example.com' })]);
+    getCleanupSuggestions.mockResolvedValue([sender({ email: 'suggestion@example.com', name: 'Suggested' })]);
     act(() => {
       onUpdate({ status: 'running', fetched: 1, total: 2, listedCount: 2, listingDone: false, error: null });
     });
 
     expect(await screen.findByText('Syncing... 1/2 synced (2 listed so far, still listing inbox)')).toBeInTheDocument();
     expect(await screen.findByText('fresh@example.com')).toBeInTheDocument();
+
+    // Cleanup Suggestions was refreshed alongside All Senders, even though
+    // the Cleanup Suggestions tab isn't the one currently visible.
+    await userEvent.click(screen.getByRole('tab', { name: 'Cleanup Suggestions' }));
+    expect(screen.getByText('Suggested <suggestion@example.com>')).toBeInTheDocument();
   });
 
   it('pauses a running sync and immediately reflects the new snapshot', async () => {
@@ -199,6 +219,7 @@ describe('sender actions wired through to the lib layer', () => {
 
     await waitFor(() => expect(trashMessages).toHaveBeenCalledWith(['1', '2', '3']));
     expect(markGone).toHaveBeenCalledWith(['1', '2', '3']);
+    expect(recordTrashedSenders).toHaveBeenCalledWith(['spammy@example.com']);
   });
 
   it('trashes multiple selected senders: merges their ids into one trashMessages/markGone call', async () => {
@@ -215,6 +236,7 @@ describe('sender actions wired through to the lib layer', () => {
 
     await waitFor(() => expect(trashMessages).toHaveBeenCalledWith(['1', '2', '3', '4', '5']));
     expect(markGone).toHaveBeenCalledWith(['1', '2', '3', '4', '5']);
+    expect(recordTrashedSenders).toHaveBeenCalledWith(['spammy@example.com', 'other@example.com']);
   });
 
   it('ignores a sender: calls ignoreSender then refreshes senders and the ignore list', async () => {
@@ -236,6 +258,58 @@ describe('sender actions wired through to the lib layer', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Unignore' }));
 
     await waitFor(() => expect(unignoreSender).toHaveBeenCalledWith('blocked@example.com'));
+  });
+});
+
+describe('Cleanup Suggestions', () => {
+  it('fetches suggestions with the default threshold (2 years) on mount', async () => {
+    render(<App />);
+    await waitFor(() => expect(getCleanupSuggestions).toHaveBeenCalledWith(2));
+  });
+
+  it('pre-fills the threshold input from localStorage', async () => {
+    localStorage.setItem('gmailCleaner.cleanupThresholdYears', '5');
+    render(<App />);
+    await waitFor(() => expect(getCleanupSuggestions).toHaveBeenCalledWith(5));
+  });
+
+  it('falls back to the default threshold when the stored value is malformed', async () => {
+    localStorage.setItem('gmailCleaner.cleanupThresholdYears', 'not a number');
+    render(<App />);
+    await waitFor(() => expect(getCleanupSuggestions).toHaveBeenCalledWith(2));
+  });
+
+  it('changing the threshold input re-queries getCleanupSuggestions and updates the rendered list', async () => {
+    render(<App />);
+    await screen.findByRole('tab', { name: 'Cleanup Suggestions' });
+    await userEvent.click(screen.getByRole('tab', { name: 'Cleanup Suggestions' }));
+
+    getCleanupSuggestions.mockResolvedValue([sender({ email: 'newly-suggested@example.com', name: 'Newly Suggested' })]);
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Inactive threshold in years' }), { target: { value: '3' } });
+
+    await waitFor(() => expect(getCleanupSuggestions).toHaveBeenCalledWith(3));
+    expect(await screen.findByText('Newly Suggested <newly-suggested@example.com>')).toBeInTheDocument();
+  });
+
+  it('discards a stale threshold-driven refresh that resolves after a later one', async () => {
+    render(<App />);
+    await screen.findByRole('tab', { name: 'Cleanup Suggestions' });
+    await userEvent.click(screen.getByRole('tab', { name: 'Cleanup Suggestions' }));
+
+    let resolveFirst;
+    getCleanupSuggestions.mockImplementationOnce(() => new Promise((resolve) => (resolveFirst = resolve)));
+    const input = screen.getByRole('spinbutton', { name: 'Inactive threshold in years' });
+    fireEvent.change(input, { target: { value: '3' } }); // slow call, still pending
+
+    getCleanupSuggestions.mockResolvedValueOnce([sender({ email: 'second@example.com' })]);
+    fireEvent.change(input, { target: { value: '4' } }); // second, faster call supersedes it
+    expect(await screen.findByText('second@example.com')).toBeInTheDocument();
+
+    // Resolving the stale first call afterward must not clobber the newer result.
+    resolveFirst([sender({ email: 'stale@example.com' })]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByText('stale@example.com')).not.toBeInTheDocument();
+    expect(screen.getByText('second@example.com')).toBeInTheDocument();
   });
 });
 

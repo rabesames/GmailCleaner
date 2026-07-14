@@ -69,7 +69,7 @@ requirements below (notably OAuth setup and Gmail API quota limits).
 | # | Requirement |
 |---|---|
 | 7.1.1 | The user must supply a Google OAuth Client ID (created by the user in Google Cloud Console) via a text field in the UI before signing in. |
-| 7.1.2 | The Client ID must never be written to any persistent storage (no `localStorage`, cookies, or files). It exists only as in-memory state for the current page load. |
+| 7.1.2 | The Client ID, a public non-secret identifier, is cached in `localStorage` and pre-filled on future visits so the user only has to paste it in once per browser — this is a convenience, not a security boundary. |
 | 7.1.3 | Clicking "Sign in with Google" must trigger Google's OAuth consent flow (via Google Identity Services) requesting the `gmail.modify` scope, the minimum scope that allows both reading mail metadata and modifying labels (needed for Trash). |
 | 7.1.4 | On successful sign-in, the resulting access token is cached in `sessionStorage` so the user isn't re-prompted for every action within the same tab session. |
 | 7.1.5 | The access token must never be cached beyond its own expiry (~1 hour) or beyond the browser tab's session (`sessionStorage`, not `localStorage`). |
@@ -91,6 +91,9 @@ requirements below (notably OAuth setup and Gmail API quota limits).
 | 7.2.8 | On each sync, messages previously known to the app that no longer appear in the current `INBOX` listing (e.g. deleted or moved via another client) must be marked inactive so they drop out of the sender rankings. |
 | 7.2.9 | Sync must tolerate and recover from Gmail API rate-limit responses (HTTP 429) via retry with backoff, rather than failing the whole sync. |
 | 7.2.10 | The UI must show the timestamp of the last completed sync. |
+| 7.2.11 | After the `INBOX` phase completes, the same "Sync Now" action also scans the user's `SENT` mail to build the set of addresses the user has ever emailed or replied to (used by Cleanup Suggestions, see 7.6). This scan runs strictly after the inbox phase, never concurrently with it, to stay within the same per-minute quota ceiling (see 9.2). |
+| 7.2.12 | The Sent-mail scan must be incremental across syncs — it re-fetches only Sent messages not already scanned in a prior sync, never the whole Sent folder again, since "has the user ever emailed address X" is a fact that never becomes stale once true. |
+| 7.2.13 | Pause/Resume/Restart (7.2.4–7.2.6) apply to the Sent-mail scan phase exactly as they do to the inbox phase. |
 
 ### 7.3 Sender Grid
 
@@ -126,19 +129,37 @@ requirements below (notably OAuth setup and Gmail API quota limits).
 | 7.5.3 | Clear Data must not clear the ignored-senders list (see 7.4.6). |
 | 7.5.4 | Clear Data must be safe to trigger even while a sync is actively running or paused, cleanly stopping that sync first. |
 
+### 7.6 Cleanup Suggestions
+
+| # | Requirement |
+|---|---|
+| 7.6.1 | The sender grid is presented as two tabs: **All Senders** (the ranked view described in 7.3) and **Cleanup Suggestions**. Both tabs offer the full grid feature set — sorting, filtering, pagination, Ignore, per-sender Move to Trash, and multi-select (7.6.6–7.6.8) — independently of each other. |
+| 7.6.2 | Cleanup Suggestions shows senders the user has never sent mail to or replied to (see 7.2.11) **and** whose most recent message is older than a user-configurable number of years, **or** any sender the user has previously used Move to Trash on via this app before (7.6.5), regardless of how recently that sender has emailed. |
+| 7.6.3 | The age threshold (in years) is a number the user can adjust directly in the Cleanup Suggestions tab; changing it re-evaluates the suggestions immediately from already-synced local data, without requiring a new sync. |
+| 7.6.4 | Cleanup Suggestions excludes ignored senders, identically to All Senders (7.4.3–7.4.4). |
+| 7.6.5 | Every sender the user moves to Trash (individually or via multi-select, 7.6.8) is permanently remembered by this app, so that if they email again, they keep appearing in Cleanup Suggestions per 7.6.2 without the user needing to wait out the age threshold again. This record is not affected by Clear Data (7.5.3 applies here too). |
+| 7.6.6 | The user can select multiple senders via a checkbox per row and a "select all" checkbox scoped to the currently visible page. |
+| 7.6.7 | A single "Move to Trash" action, positioned above both tabs, moves every selected sender's mail to Trash in one confirmation step, after showing the total message and sender count. It is disabled whenever no sender is selected. |
+| 7.6.8 | A sender selected while viewing one tab remains selected (and counted toward 7.6.7) if the user switches to the other tab and the same sender also appears there. |
+
 ## 8. Data Model
 
 Synced state is stored in the browser's IndexedDB (database
-`gmailCleaner`), in three object stores:
+`gmailCleaner`), in six object stores:
 
 | Store | Key | Fields |
 |---|---|---|
 | `messages` | Gmail message `id` | `from`, `subject`, `date`, `sizeEstimate`, `snippet`, `deleted` (soft-delete flag) |
 | `meta` | fixed key | `lastSyncedAt` (ISO timestamp) |
 | `ignoredSenders` | sender email | (presence in the store is the only fact recorded) |
+| `contactedAddresses` | email address | (presence only) every address ever sent-to/CC'd, from scanning Sent mail (7.2.11) |
+| `trashedSenders` | sender email | (presence only) senders previously Move-to-Trash'd via this app (7.6.5) |
+| `scannedSentIds` | Sent message `id` | (presence only) tracks which Sent messages have already been scanned, for the incremental scan (7.2.12) |
 
-Nothing else is persisted anywhere: the OAuth Client ID lives only in
-page state, and the OAuth access token lives only in `sessionStorage`.
+The OAuth Client ID is cached in `localStorage` (7.1.2) and the OAuth
+access token lives only in `sessionStorage`; the user-configured Cleanup
+Suggestions age threshold (7.6.3) is also cached in `localStorage` as a
+UI preference, not mailbox data.
 
 ## 9. Non-Functional Requirements
 
@@ -165,7 +186,11 @@ page state, and the OAuth access token lives only in `sessionStorage`.
 - A first-time sync of a large, never-before-synced mailbox can
   therefore take several minutes; this is a Google-imposed limit the
   app cannot work around, only communicate honestly (progress bar,
-  status text noting when the total is still growing).
+  status text noting when the total is still growing). The Sent-mail
+  scan (7.2.11) uses the same `messages.get`-equivalent cost per message,
+  so a first-time sync's worst-case time roughly doubles versus syncing
+  `INBOX` alone — paid once, since the scan is incremental (7.2.12) on
+  every subsequent sync.
 - Reported message sizes are Gmail's own `sizeEstimate` field — an
   approximation, not an exact byte count.
 
@@ -204,6 +229,15 @@ page state, and the OAuth access token lives only in `sessionStorage`.
 4. User hovers a sender to confirm (via the message preview) they
    recognize it, then clicks Move to Trash — or clicks Ignore if it's a
    sender they never want to bulk-trash.
+
+**Bulk cleanup via suggestions**
+1. User switches to the Cleanup Suggestions tab and optionally adjusts
+   the age threshold.
+2. User reviews the pre-filtered list of senders they've never emailed
+   and haven't heard from recently (or have trashed before).
+3. User checks several senders and clicks the single "Move to Trash"
+   action above the tabs, confirming the combined message/sender count
+   once.
 
 **Recovering from a bad state**
 1. If sync data looks wrong or stale, the user clicks Clear Data and

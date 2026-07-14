@@ -9,13 +9,16 @@ import { describe, it, expect } from 'vitest';
 // same file attempting a version bump (see store.versionConflict.test.js)
 // would deadlock waiting for this one's connection to close first.
 describe('openDb schema creation', () => {
-  it('creates all three object stores on a genuinely fresh database', async () => {
+  it('creates all six object stores on a genuinely fresh database', async () => {
     const store = await import('./store.js');
 
-    // Exercises all three stores so this fails loudly if the upgrade
+    // Exercises all six stores so this fails loudly if the upgrade
     // handler is broken for any one of them, not just "some" store.
     await expect(store.getActiveIds()).resolves.toEqual([]);
     await expect(store.getLastSyncedAt()).resolves.toBeNull();
     await expect(store.getIgnoredSenders()).resolves.toEqual([]);
+    await expect(store.getContactedAddresses()).resolves.toEqual([]);
+    await expect(store.getTrashedSenders()).resolves.toEqual([]);
+    await expect(store.getScannedSentIds()).resolves.toEqual([]);
   });
 });

@@ -3,21 +3,13 @@ import Pagination from './Pagination.jsx';
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50, 100];
 
-// Sort/filter choices are remembered in localStorage (same "public,
-// non-secret, convenience only" treatment as the OAuth Client ID in
-// auth.js) so returning to the app doesn't lose how you last narrowed the
-// list down. Page/pageSize deliberately aren't included here -- which page
-// you were on isn't meaningful once the underlying sender list has changed
-// after a fresh sync.
-const SORT_STORAGE_KEY = 'gmailCleaner.sendersSort';
-const FILTERS_STORAGE_KEY = 'gmailCleaner.sendersFilters';
 const SORT_COLUMNS = ['name', 'messageCount', 'totalSize'];
 const DEFAULT_SORT_STATE = { column: 'totalSize', direction: 'desc' };
 const DEFAULT_FILTERS = { sender: '', messages: '', totalSize: '' };
 
-function loadStoredSort() {
+function loadStoredSort(storageKeyPrefix) {
   try {
-    const parsed = JSON.parse(localStorage.getItem(SORT_STORAGE_KEY));
+    const parsed = JSON.parse(localStorage.getItem(`${storageKeyPrefix}Sort`));
     const validColumn = parsed.column === null || SORT_COLUMNS.includes(parsed.column);
     const validDirection = parsed.direction === 'asc' || parsed.direction === 'desc';
     if (validColumn && (parsed.column === null || validDirection)) return parsed;
@@ -27,9 +19,9 @@ function loadStoredSort() {
   return DEFAULT_SORT_STATE;
 }
 
-function loadStoredFilters() {
+function loadStoredFilters(storageKeyPrefix) {
   try {
-    const parsed = JSON.parse(localStorage.getItem(FILTERS_STORAGE_KEY));
+    const parsed = JSON.parse(localStorage.getItem(`${storageKeyPrefix}Filters`));
     if (Object.keys(DEFAULT_FILTERS).every((key) => typeof parsed[key] === 'string')) return parsed;
   } catch {
     // Malformed/missing storage -- fall through to the default below.
@@ -100,32 +92,34 @@ function sortIndicator(sortState, column) {
   return sortState.direction === 'asc' ? ' ▲' : ' ▼';
 }
 
-export default function SendersTable({ senders, onTrash, onIgnore, onTrashSelected }) {
-  const [sortState, setSortState] = useState(loadStoredSort);
-  const [filters, setFilters] = useState(loadStoredFilters);
-  const [selected, setSelected] = useState(() => new Set());
-  const [bulkBusy, setBulkBusy] = useState(false);
+// Selection lives above this component (see SendersSection.jsx) since two
+// instances of this table (All Senders / Cleanup Suggestions) share one
+// selection Set and one "Move to Trash" toolbar. Sort/filter/pagination stay
+// local here -- each tab's sort/filter is independently remembered via
+// `storageKeyPrefix` (so the two instances don't clobber each other's
+// localStorage keys), and pagination is never persisted at all.
+export default function SendersTable({
+  senders,
+  onTrash,
+  onIgnore,
+  selected,
+  onToggleSelect,
+  onToggleSelectAll,
+  storageKeyPrefix,
+  noDataMessage,
+}) {
+  const [sortState, setSortState] = useState(() => loadStoredSort(storageKeyPrefix));
+  const [filters, setFilters] = useState(() => loadStoredFilters(storageKeyPrefix));
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
 
   useEffect(() => {
-    localStorage.setItem(SORT_STORAGE_KEY, JSON.stringify(sortState));
-  }, [sortState]);
+    localStorage.setItem(`${storageKeyPrefix}Sort`, JSON.stringify(sortState));
+  }, [storageKeyPrefix, sortState]);
 
   useEffect(() => {
-    localStorage.setItem(FILTERS_STORAGE_KEY, JSON.stringify(filters));
-  }, [filters]);
-
-  // A sender that drops out of `senders` (trashed, ignored) should also drop
-  // out of the selection -- otherwise a stale email could linger in
-  // `selected` indefinitely with nothing in the list to ever deselect it.
-  useEffect(() => {
-    setSelected((prev) => {
-      const emails = new Set(senders.map((sender) => sender.email));
-      const next = new Set([...prev].filter((email) => emails.has(email)));
-      return next.size === prev.size ? prev : next;
-    });
-  }, [senders]);
+    localStorage.setItem(`${storageKeyPrefix}Filters`, JSON.stringify(filters));
+  }, [storageKeyPrefix, filters]);
 
   const filteredSenders = useMemo(() => {
     const senderQuery = filters.sender.trim().toLowerCase();
@@ -160,7 +154,7 @@ export default function SendersTable({ senders, onTrash, onIgnore, onTrashSelect
 
   let emptyMessage = null;
   if (sortedSenders.length === 0) {
-    emptyMessage = senders.length > 0 ? 'No senders match the current filters.' : 'Sign in and click "Sync Now" to fetch your inbox.';
+    emptyMessage = senders.length > 0 ? 'No senders match the current filters.' : noDataMessage;
   }
 
   // `page` can point past the end after filtering/page-size shrinks the
@@ -179,8 +173,6 @@ export default function SendersTable({ senders, onTrash, onIgnore, onTrashSelect
     setPage(1);
   };
 
-  const selectedSenders = useMemo(() => senders.filter((sender) => selected.has(sender.email)), [senders, selected]);
-
   // Select-all applies to the current page only, matching how paginated
   // tables typically scope "select all" (Gmail's own inbox included).
   const allVisibleSelected = pagedSenders.length > 0 && pagedSenders.every((sender) => selected.has(sender.email));
@@ -190,56 +182,9 @@ export default function SendersTable({ senders, onTrash, onIgnore, onTrashSelect
     selectAllRef.current.indeterminate = someVisibleSelected;
   }, [someVisibleSelected]);
 
-  const toggleSelected = (email) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(email)) next.delete(email);
-      else next.add(email);
-      return next;
-    });
-  };
-
-  const toggleSelectAll = () => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (allVisibleSelected) {
-        pagedSenders.forEach((sender) => next.delete(sender.email));
-      } else {
-        pagedSenders.forEach((sender) => next.add(sender.email));
-      }
-      return next;
-    });
-  };
-
-  const handleTrashSelected = async () => {
-    const totalMessages = selectedSenders.reduce((sum, sender) => sum + sender.messageCount, 0);
-    const label = selectedSenders.length === 1 ? '1 sender' : `${selectedSenders.length} senders`;
-    if (!confirm(`Move all ${totalMessages} email(s) from ${label} to Trash?`)) return;
-    setBulkBusy(true);
-    try {
-      await onTrashSelected(selectedSenders);
-      // On success every trashed sender drops out of `senders`, which the
-      // effect above already prunes from `selected` -- nothing more to do.
-    } catch (err) {
-      alert(err.message);
-    } finally {
-      setBulkBusy(false);
-    }
-  };
-
   return (
     <>
-      <div className="table-toolbar">
-        <button
-          className="danger"
-          aria-label="Move selected senders to Trash"
-          disabled={selectedSenders.length === 0 || bulkBusy}
-          onClick={handleTrashSelected}
-        >
-          {bulkBusy ? 'Working...' : `Move to Trash${selectedSenders.length ? ` (${selectedSenders.length})` : ''}`}
-        </button>
-      </div>
-      <table id="sendersTable">
+      <table className="sendersTable">
         <thead>
           <tr>
             <th className="select-col">
@@ -248,7 +193,7 @@ export default function SendersTable({ senders, onTrash, onIgnore, onTrashSelect
                   type="checkbox"
                   ref={selectAllRef}
                   checked={allVisibleSelected}
-                  onChange={toggleSelectAll}
+                  onChange={() => onToggleSelectAll(pagedSenders)}
                   aria-label="Select all senders on this page"
                 />
               </label>
@@ -314,7 +259,7 @@ export default function SendersTable({ senders, onTrash, onIgnore, onTrashSelect
               onTrash={onTrash}
               onIgnore={onIgnore}
               selected={selected.has(sender.email)}
-              onToggleSelect={toggleSelected}
+              onToggleSelect={onToggleSelect}
             />
           ))}
         </tbody>

@@ -123,3 +123,41 @@ describe('SyncControls: paused state', () => {
     expect(noop.onResume).toHaveBeenCalledTimes(1);
   });
 });
+
+// A sync job runs a second, sequential "sent mail scan" phase after the
+// inbox phase (see sync.js); phase-less snapshots (every test above, and
+// every snapshot from before that phase existed) must keep rendering
+// exactly the same text as today -- only phase: 'sent' should change it.
+describe('SyncControls: sent-mail scan phase', () => {
+  const runningSentSnapshot = {
+    status: 'running',
+    phase: 'sent',
+    fetched: 2,
+    total: 8,
+    listedCount: 15,
+    listingDone: false,
+    error: null,
+  };
+
+  it('shows "Scanning sent mail..." with a "still listing sent mail" note while running and not done listing', () => {
+    render(<SyncControls snapshot={runningSentSnapshot} signedIn {...noop} lastSyncedAt={null} />);
+    expect(screen.getByText('Scanning sent mail... 2/8 synced (15 listed so far, still listing sent mail)')).toBeInTheDocument();
+  });
+
+  it('omits the "still listing" note once sent-mail listing is done', () => {
+    render(<SyncControls snapshot={{ ...runningSentSnapshot, listingDone: true }} signedIn {...noop} lastSyncedAt={null} />);
+    expect(screen.getByText('Scanning sent mail... 2/8 synced')).toBeInTheDocument();
+  });
+
+  it('shows a distinct paused message for the sent phase', () => {
+    const pausedSentSnapshot = { status: 'paused', phase: 'sent', fetched: 2, total: 8, listedCount: 8, listingDone: true, error: null };
+    render(<SyncControls snapshot={pausedSentSnapshot} signedIn {...noop} lastSyncedAt={null} />);
+    expect(screen.getByText('Paused scanning sent mail at 2/8')).toBeInTheDocument();
+  });
+
+  it('a phase-less snapshot renders the original inbox wording unchanged (regression check)', () => {
+    const runningSnapshot = { status: 'running', fetched: 3, total: 10, listedCount: 20, listingDone: false, error: null };
+    render(<SyncControls snapshot={runningSnapshot} signedIn {...noop} lastSyncedAt={null} />);
+    expect(screen.getByText('Syncing... 3/10 synced (20 listed so far, still listing inbox)')).toBeInTheDocument();
+  });
+});

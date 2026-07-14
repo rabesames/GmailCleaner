@@ -6,7 +6,15 @@ vi.mock('./auth.js', () => ({
 }));
 
 import { getAccessToken, invalidateStoredToken } from './auth.js';
-import { withRetry, listInboxMessagePages, getMessageMetadata, trashMessages, METADATA_FETCH_CONCURRENCY } from './gmailApi.js';
+import {
+  withRetry,
+  listInboxMessagePages,
+  listSentMessagePages,
+  getMessageMetadata,
+  getMessageRecipients,
+  trashMessages,
+  METADATA_FETCH_CONCURRENCY,
+} from './gmailApi.js';
 
 function jsonResponse(status, body) {
   return {
@@ -183,6 +191,40 @@ describe('listInboxMessagePages', () => {
     for await (const page of listInboxMessagePages()) pages.push(page);
     expect(pages).toEqual([[]]);
   });
+
+  it('requests labelIds=INBOX', async () => {
+    fetch.mockResolvedValueOnce(jsonResponse(200, { messages: [] }));
+    await listInboxMessagePages().next();
+    expect(fetch.mock.calls[0][0]).toContain('labelIds=INBOX');
+  });
+});
+
+describe('listSentMessagePages', () => {
+  it('yields a single page when there is no nextPageToken', async () => {
+    fetch.mockResolvedValueOnce(jsonResponse(200, { messages: [{ id: '1' }, { id: '2' }] }));
+    const pages = [];
+    for await (const page of listSentMessagePages()) pages.push(page);
+    expect(pages).toEqual([['1', '2']]);
+  });
+
+  it('pages through multiple results using pageToken', async () => {
+    fetch
+      .mockResolvedValueOnce(jsonResponse(200, { messages: [{ id: '1' }], nextPageToken: 'p2' }))
+      .mockResolvedValueOnce(jsonResponse(200, { messages: [{ id: '2' }] }));
+
+    const pages = [];
+    for await (const page of listSentMessagePages()) pages.push(page);
+    expect(pages).toEqual([['1'], ['2']]);
+
+    const secondCallUrl = fetch.mock.calls[1][0];
+    expect(secondCallUrl).toContain('pageToken=p2');
+  });
+
+  it('requests labelIds=SENT', async () => {
+    fetch.mockResolvedValueOnce(jsonResponse(200, { messages: [] }));
+    await listSentMessagePages().next();
+    expect(fetch.mock.calls[0][0]).toContain('labelIds=SENT');
+  });
 });
 
 describe('getMessageMetadata', () => {
@@ -222,6 +264,39 @@ describe('getMessageMetadata', () => {
     fetch.mockResolvedValueOnce(jsonResponse(200, { id: 'm3', payload: {} }));
     const result = await getMessageMetadata('m3');
     expect(result.from).toBeNull();
+  });
+});
+
+describe('getMessageRecipients', () => {
+  it('extracts To/Cc headers case-insensitively', async () => {
+    fetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        id: 's1',
+        payload: {
+          headers: [
+            { name: 'TO', value: 'a@example.com' },
+            { name: 'Cc', value: 'b@example.com' },
+          ],
+        },
+      })
+    );
+    const result = await getMessageRecipients('s1');
+    expect(result).toEqual({ id: 's1', to: 'a@example.com', cc: 'b@example.com' });
+  });
+
+  it('defaults missing To/Cc to null', async () => {
+    fetch.mockResolvedValueOnce(jsonResponse(200, { id: 's2' }));
+    const result = await getMessageRecipients('s2');
+    expect(result).toEqual({ id: 's2', to: null, cc: null });
+  });
+
+  it('requests only the To and Cc headers', async () => {
+    fetch.mockResolvedValueOnce(jsonResponse(200, { id: 's3' }));
+    await getMessageRecipients('s3');
+    const url = fetch.mock.calls[0][0];
+    expect(url).toContain('metadataHeaders=To');
+    expect(url).toContain('metadataHeaders=Cc');
+    expect(url).not.toContain('metadataHeaders=From');
   });
 });
 

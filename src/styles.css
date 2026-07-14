@@ -141,6 +141,50 @@ main {
   box-shadow: 0 1px 0 rgba(0, 0, 0, 0.08);
 }
 
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid #e0e0e0;
+  margin-bottom: 1rem;
+}
+
+button.tab {
+  background: transparent;
+  color: #666;
+  border: none;
+  border-radius: 0;
+  border-bottom: 2px solid transparent;
+  padding: 0.6rem 0.25rem;
+  margin-right: 1rem;
+  font-size: 0.9rem;
+}
+
+button.tab:hover:not(:disabled) {
+  background: transparent;
+  color: #1a1a1a;
+}
+
+button.tab.active {
+  color: #1a73e8;
+  border-bottom-color: #1a73e8;
+  font-weight: 600;
+}
+
+.cleanup-controls {
+  margin-bottom: 0.75rem;
+  font-size: 0.9rem;
+  color: #666;
+}
+
+.cleanup-controls input[type='number'] {
+  width: 4.5rem;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  color: #1a1a1a;
+}
+
 th.select-col,
 td.select-col {
   width: 2.75rem;

@@ -7,7 +7,9 @@ let concurrency = 1;
 
 vi.mock('./gmailApi.js', () => ({
   listInboxMessagePages: vi.fn(),
+  listSentMessagePages: vi.fn(),
   getMessageMetadata: vi.fn(),
+  getMessageRecipients: vi.fn(),
   withRetry: vi.fn((fn) => fn()),
   get METADATA_FETCH_CONCURRENCY() {
     return concurrency;
@@ -19,10 +21,12 @@ vi.mock('./store.js', () => ({
   markGone: vi.fn().mockResolvedValue(undefined),
   upsertMessages: vi.fn().mockResolvedValue(undefined),
   setLastSyncedAt: vi.fn().mockResolvedValue(undefined),
+  getScannedSentIds: vi.fn().mockResolvedValue([]),
+  recordSentMessageRecipients: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { listInboxMessagePages, getMessageMetadata } from './gmailApi.js';
-import { getActiveIds, markGone, upsertMessages, setLastSyncedAt } from './store.js';
+import { listInboxMessagePages, listSentMessagePages, getMessageMetadata, getMessageRecipients } from './gmailApi.js';
+import { getActiveIds, markGone, upsertMessages, setLastSyncedAt, getScannedSentIds, recordSentMessageRecipients } from './store.js';
 import { startSync, pauseSync, resumeSync, resetSync, getSyncSnapshot } from './sync.js';
 
 // A hand-driven async generator standing in for listInboxMessagePages():
@@ -84,6 +88,12 @@ beforeEach(() => {
   markGone.mockResolvedValue(undefined);
   upsertMessages.mockResolvedValue(undefined);
   setLastSyncedAt.mockResolvedValue(undefined);
+  // Every test not specifically about the sent-mail scan phase gets an
+  // immediately-exhausted Sent listing, so runJob's phase: 'inbox' -> 'sent'
+  // fallthrough completes without ever queuing a recipients fetch.
+  listSentMessagePages.mockImplementation(async function* () {});
+  getScannedSentIds.mockResolvedValue([]);
+  recordSentMessageRecipients.mockResolvedValue(undefined);
   resetSync();
 });
 
@@ -103,8 +113,12 @@ describe('startSync happy paths', () => {
     const onUpdate = vi.fn();
     await startSync(onUpdate);
 
+    // The snapshot's total/fetched/listedCount/listingDone report whichever
+    // phase is current -- once the job is fully 'done' that's the (empty,
+    // in this test) sent phase, so the inbox phase's own work is verified
+    // via the upsertMessages calls below instead of the final snapshot.
     const snapshot = getSyncSnapshot();
-    expect(snapshot).toMatchObject({ status: 'done', total: 2, fetched: 2, listedCount: 2, listingDone: true, error: null });
+    expect(snapshot).toMatchObject({ status: 'done', error: null });
     expect(upsertMessages).toHaveBeenCalledWith([{ id: 'a', from: 'a@example.com' }]);
     expect(upsertMessages).toHaveBeenCalledWith([{ id: 'b', from: 'b@example.com' }]);
     expect(setLastSyncedAt).toHaveBeenCalledTimes(1);
@@ -123,7 +137,7 @@ describe('startSync happy paths', () => {
 
     expect(getMessageMetadata).toHaveBeenCalledTimes(1);
     expect(getMessageMetadata).toHaveBeenCalledWith('b');
-    expect(getSyncSnapshot()).toMatchObject({ total: 1, fetched: 1 });
+    expect(getSyncSnapshot().status).toBe('done');
   });
 
   it('marks previously-known ids gone when they no longer appear in the listing', async () => {
@@ -159,9 +173,14 @@ describe('startSync happy paths', () => {
 
       fetcher.resolve('a', { id: 'a' });
       fetcher.resolve('b', { id: 'b' });
+      // The job still has to run its (empty, in this test) sent phase after
+      // the inbox phase resolves -- its workers idle-poll once before
+      // noticing the sent listing is already done, same IDLE_POLL_MS wait
+      // as the inbox side above.
+      await vi.advanceTimersByTimeAsync(200);
       await donePromise;
 
-      expect(getSyncSnapshot()).toMatchObject({ status: 'done', fetched: 2 });
+      expect(getSyncSnapshot().status).toBe('done');
     } finally {
       vi.useRealTimers();
     }
@@ -268,8 +287,14 @@ describe('pause / resume', () => {
       await vi.advanceTimersByTimeAsync(200);
       fetcher.resolve('b', { id: 'b' });
       await vi.advanceTimersByTimeAsync(0);
+      expect(upsertMessages).toHaveBeenCalledWith([{ id: 'b' }]);
 
-      expect(getSyncSnapshot()).toMatchObject({ status: 'done', fetched: 2, total: 2 });
+      // The job still has to run its (empty, in this test) sent phase
+      // after the inbox phase resolves -- same IDLE_POLL_MS wait as above,
+      // and once 'done' the snapshot's fetched/total report that (empty)
+      // sent phase rather than the inbox counts just verified above.
+      await vi.advanceTimersByTimeAsync(200);
+      expect(getSyncSnapshot().status).toBe('done');
     } finally {
       vi.useRealTimers();
     }
@@ -305,8 +330,12 @@ describe('pause / resume', () => {
       resumeSync(onUpdate);
       releaseSecondPage();
       await vi.advanceTimersByTimeAsync(200);
+      expect(upsertMessages).toHaveBeenCalledTimes(2); // both 'a' (before pause) and 'b' (after resume)
 
-      expect(getSyncSnapshot()).toMatchObject({ status: 'done', listingDone: true, fetched: 2 });
+      // The job still has to run its (empty, in this test) sent phase
+      // after the inbox phase resolves -- same IDLE_POLL_MS wait as above.
+      await vi.advanceTimersByTimeAsync(200);
+      expect(getSyncSnapshot().status).toBe('done');
     } finally {
       vi.useRealTimers();
     }
@@ -365,12 +394,170 @@ describe('resetSync', () => {
     const secondRun = startSync(vi.fn());
     await secondRun;
 
-    expect(getSyncSnapshot()).toMatchObject({ status: 'done', total: 1 });
+    expect(getMessageMetadata).toHaveBeenCalledWith('x');
+    expect(getSyncSnapshot().status).toBe('done');
 
     // Let the first job's abandoned listing settle so it doesn't dangle.
     firstPager.finish();
     await firstRun;
-    expect(getSyncSnapshot()).toMatchObject({ status: 'done', total: 1 }); // unchanged by the stale job
+    expect(getSyncSnapshot().status).toBe('done'); // unchanged by the stale job
+  });
+});
+
+describe('sent-mail scan phase', () => {
+  it('only starts scanning sent mail after the inbox phase fully completes', async () => {
+    listInboxMessagePages.mockImplementation(async function* () {
+      yield ['a'];
+    });
+    getMessageMetadata.mockResolvedValue({ id: 'a' });
+    listSentMessagePages.mockImplementation(async function* () {
+      yield ['s1'];
+    });
+    getMessageRecipients.mockResolvedValue({ id: 's1', to: 'x@example.com', cc: null });
+
+    const updates = [];
+    await startSync((snapshot) => updates.push(snapshot));
+
+    const inboxUpdates = updates.filter((u) => u.phase === 'inbox');
+    const sentUpdates = updates.filter((u) => u.phase === 'sent');
+    expect(inboxUpdates.length).toBeGreaterThan(0);
+    expect(sentUpdates.length).toBeGreaterThan(0);
+    // Every 'inbox'-phase update happened before every 'sent'-phase update.
+    expect(updates.indexOf(inboxUpdates[inboxUpdates.length - 1])).toBeLessThan(updates.indexOf(sentUpdates[0]));
+    expect(getSyncSnapshot().status).toBe('done');
+  });
+
+  it('only fetches recipients for sent ids not already scanned', async () => {
+    listInboxMessagePages.mockImplementation(async function* () {});
+    getScannedSentIds.mockResolvedValue(['already-scanned']);
+    listSentMessagePages.mockImplementation(async function* () {
+      yield ['already-scanned', 'new-one'];
+    });
+    getMessageRecipients.mockImplementation(async (id) => ({ id, to: `${id}@example.com`, cc: null }));
+
+    await startSync(vi.fn());
+
+    expect(getMessageRecipients).toHaveBeenCalledTimes(1);
+    expect(getMessageRecipients).toHaveBeenCalledWith('new-one');
+  });
+
+  it('does not enqueue anything for a sent page where every id is already scanned', async () => {
+    listInboxMessagePages.mockImplementation(async function* () {});
+    getScannedSentIds.mockResolvedValue(['already-1', 'already-2']);
+    listSentMessagePages.mockImplementation(async function* () {
+      yield ['already-1', 'already-2'];
+    });
+
+    await startSync(vi.fn());
+
+    expect(getMessageRecipients).not.toHaveBeenCalled();
+    expect(getSyncSnapshot().status).toBe('done');
+  });
+
+  it('records each fetched sent message via recordSentMessageRecipients', async () => {
+    listInboxMessagePages.mockImplementation(async function* () {});
+    listSentMessagePages.mockImplementation(async function* () {
+      yield ['s1'];
+    });
+    getMessageRecipients.mockResolvedValue({ id: 's1', to: 'to@example.com', cc: 'cc@example.com' });
+
+    await startSync(vi.fn());
+
+    expect(recordSentMessageRecipients).toHaveBeenCalledWith({ id: 's1', to: 'to@example.com', cc: 'cc@example.com' });
+  });
+
+  it('only reaches status done once both the inbox and sent phases finish', async () => {
+    vi.useFakeTimers();
+    try {
+      const sentPager = createManualPager();
+      listInboxMessagePages.mockImplementation(async function* () {
+        yield ['a'];
+      });
+      getMessageMetadata.mockResolvedValue({ id: 'a' });
+      listSentMessagePages.mockImplementation(() => sentPager.generator);
+      getMessageRecipients.mockResolvedValue({ id: 's1', to: null, cc: null });
+
+      startSync(vi.fn());
+      // Let the inbox phase fully finish and the job transition to 'sent'.
+      await vi.advanceTimersByTimeAsync(200);
+      expect(getSyncSnapshot()).toMatchObject({ status: 'running', phase: 'sent' });
+
+      sentPager.pushPage(['s1']);
+      await vi.advanceTimersByTimeAsync(0);
+      sentPager.finish();
+      await vi.advanceTimersByTimeAsync(200);
+
+      expect(getSyncSnapshot().status).toBe('done');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('pausing during the sent phase freezes it, and resuming continues it', async () => {
+    vi.useFakeTimers();
+    try {
+      listInboxMessagePages.mockImplementation(async function* () {
+        yield ['a'];
+      });
+      getMessageMetadata.mockResolvedValue({ id: 'a' });
+      listSentMessagePages.mockImplementation(async function* () {
+        yield ['s1', 's2'];
+      });
+      const fetcher = createManualFetcher();
+      getMessageRecipients.mockImplementation(fetcher.fn);
+
+      const onUpdate = vi.fn();
+      startSync(onUpdate);
+      // First 200ms: the inbox phase's own idle-poll-then-fetch cycle for
+      // 'a'. Second 200ms: the sent phase's own idle-poll-then-fetch cycle
+      // for 's1' -- each phase's worker only starts polling once its own
+      // pipeline is running, so these can't be collapsed into one wait.
+      await vi.advanceTimersByTimeAsync(200);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(getMessageRecipients).toHaveBeenCalledWith('s1');
+      expect(getMessageRecipients).not.toHaveBeenCalledWith('s2');
+
+      pauseSync();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getSyncSnapshot()).toMatchObject({ status: 'paused', phase: 'sent' });
+
+      fetcher.resolve('s1', { id: 's1', to: null, cc: null });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getMessageRecipients).not.toHaveBeenCalledWith('s2');
+
+      resumeSync(onUpdate);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(getMessageRecipients).toHaveBeenCalledWith('s2');
+      fetcher.resolve('s2', { id: 's2', to: null, cc: null });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(getSyncSnapshot().status).toBe('done');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('goes to the error state when the sent listing iterator throws', async () => {
+    listInboxMessagePages.mockImplementation(async function* () {});
+    listSentMessagePages.mockImplementation(async function* () {
+      throw new Error('sent listing failed');
+    });
+
+    await startSync(vi.fn());
+
+    expect(getSyncSnapshot()).toMatchObject({ status: 'error', error: 'sent listing failed' });
+  });
+
+  it('goes to the error state when a recipients fetch fails', async () => {
+    listInboxMessagePages.mockImplementation(async function* () {});
+    listSentMessagePages.mockImplementation(async function* () {
+      yield ['s1'];
+    });
+    getMessageRecipients.mockRejectedValue(new Error('recipients fetch failed'));
+
+    await startSync(vi.fn());
+
+    expect(getSyncSnapshot()).toMatchObject({ status: 'error', error: 'recipients fetch failed' });
   });
 });
 
@@ -501,6 +688,152 @@ describe('supersession mid-await guards', () => {
       resolveUpsert();
       await vi.advanceTimersByTimeAsync(0);
 
+      expect(getSyncSnapshot()).toEqual({ status: 'idle' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not mark the job errored if superseded while getScannedSentIds was about to reject', async () => {
+    let rejectScannedIds;
+    getScannedSentIds.mockImplementation(() => new Promise((_, reject) => (rejectScannedIds = reject)));
+
+    startSync(vi.fn());
+    await flushMicrotasks();
+
+    resetSync();
+    rejectScannedIds(new Error('db exploded'));
+    await flushMicrotasks();
+
+    expect(getSyncSnapshot()).toEqual({ status: 'idle' });
+  });
+
+  it('does not mark the job errored if superseded while the sent listing iterator was about to reject', async () => {
+    vi.useFakeTimers();
+    try {
+      listInboxMessagePages.mockImplementation(async function* () {});
+      let rejectNext;
+      listSentMessagePages.mockImplementation(async function* () {
+        await new Promise((_, reject) => {
+          rejectNext = reject;
+        });
+      });
+
+      startSync(vi.fn());
+      // Let the (empty) inbox phase finish -- its own fetch worker still
+      // has to idle-poll once before noticing there's nothing to do -- so
+      // the sent listing iterator's first .next() call actually starts.
+      await vi.advanceTimersByTimeAsync(200);
+
+      resetSync();
+      rejectNext(new Error('sent listing exploded'));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(getSyncSnapshot()).toEqual({ status: 'idle' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not mark the job errored if superseded while a recipients fetch was about to reject', async () => {
+    vi.useFakeTimers();
+    try {
+      listInboxMessagePages.mockImplementation(async function* () {});
+      listSentMessagePages.mockImplementation(async function* () {
+        yield ['s1'];
+      });
+      const fetcher = createManualFetcher();
+      getMessageRecipients.mockImplementation(fetcher.fn);
+
+      startSync(vi.fn());
+      // Two idle-poll cycles: one for the (empty) inbox phase, one for the
+      // sent phase's own worker before it notices 's1' in its queue.
+      await vi.advanceTimersByTimeAsync(200);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(getMessageRecipients).toHaveBeenCalledWith('s1');
+
+      resetSync();
+      fetcher.reject('s1', new Error('recipients fetch exploded'));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(getSyncSnapshot()).toEqual({ status: 'idle' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not increment sentFetchedCount if superseded while recordSentMessageRecipients was in flight', async () => {
+    vi.useFakeTimers();
+    try {
+      listInboxMessagePages.mockImplementation(async function* () {});
+      listSentMessagePages.mockImplementation(async function* () {
+        yield ['s1'];
+      });
+      getMessageRecipients.mockResolvedValue({ id: 's1', to: null, cc: null });
+      let resolveRecord;
+      recordSentMessageRecipients.mockImplementation(() => new Promise((resolve) => (resolveRecord = resolve)));
+
+      startSync(vi.fn());
+      await vi.advanceTimersByTimeAsync(200);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(recordSentMessageRecipients).toHaveBeenCalledWith({ id: 's1', to: null, cc: null });
+
+      resetSync();
+      resolveRecord();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(getSyncSnapshot()).toEqual({ status: 'idle' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not process a page if superseded right after the sent listing iterator resolved successfully', async () => {
+    vi.useFakeTimers();
+    try {
+      listInboxMessagePages.mockImplementation(async function* () {});
+      const sentPager = createManualPager();
+      listSentMessagePages.mockImplementation(() => sentPager.generator);
+
+      startSync(vi.fn());
+      // Let the (empty) inbox phase finish and the sent listing loop's
+      // first .next() call actually start waiting on the manual pager.
+      await vi.advanceTimersByTimeAsync(200);
+
+      resetSync();
+      // Resolves the pending .next() call *after* supersession -- this is
+      // the "job !== myJob" recheck right after a successful (non-throwing)
+      // resolve, distinct from the reject-path test above.
+      sentPager.pushPage(['s1']);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(getMessageRecipients).not.toHaveBeenCalled();
+      expect(getSyncSnapshot()).toEqual({ status: 'idle' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not call recordSentMessageRecipients if superseded right after a recipients fetch resolved successfully', async () => {
+    vi.useFakeTimers();
+    try {
+      listInboxMessagePages.mockImplementation(async function* () {});
+      listSentMessagePages.mockImplementation(async function* () {
+        yield ['s1'];
+      });
+      const fetcher = createManualFetcher();
+      getMessageRecipients.mockImplementation(fetcher.fn);
+
+      startSync(vi.fn());
+      await vi.advanceTimersByTimeAsync(200);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(getMessageRecipients).toHaveBeenCalledWith('s1');
+
+      resetSync();
+      fetcher.resolve('s1', { id: 's1', to: null, cc: null });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(recordSentMessageRecipients).not.toHaveBeenCalled();
       expect(getSyncSnapshot()).toEqual({ status: 'idle' });
     } finally {
       vi.useRealTimers();

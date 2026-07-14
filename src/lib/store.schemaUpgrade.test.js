@@ -5,18 +5,18 @@ import { describe, it, expect } from 'vitest';
 // closes its connection, so this needs to be the only thing that has ever
 // touched this worker's `gmailCleaner` database.
 //
-// Simulates a version bump that doesn't actually need new stores (e.g. a
-// future DB_VERSION increase for some unrelated reason) by pre-creating all
-// three stores at version 1, then letting store.js open at its current
+// Simulates a version bump where only the original three stores already
+// exist (e.g. a user upgrading from the v2 schema) by pre-creating just
+// those three at version 1, then letting store.js open at its current
 // DB_VERSION. onupgradeneeded still fires on any version increase
 // regardless of whether the schema itself changed, so this is what actually
-// exercises the "already exists, skip" branch of each
-// `if (!db.objectStoreNames.contains(...))` check -- every other test only
-// ever sees a totally-fresh database, where all three checks are
-// unconditionally true (the "create" branch, covered by
-// store.openDb.test.js).
+// exercises both branches of each `if (!db.objectStoreNames.contains(...))`
+// check in the same pass: "already exists, skip" for the original three,
+// and "doesn't exist yet, create" for the three v3 additions -- every other
+// test only ever sees a totally-fresh database, where all six checks are
+// unconditionally true (covered by store.openDb.test.js).
 describe('openDb schema upgrade', () => {
-  it('skips creating object stores that already exist', async () => {
+  it('skips creating object stores that already exist, and creates newly-added ones', async () => {
     await new Promise((resolve, reject) => {
       const req = indexedDB.open('gmailCleaner', 1);
       req.onupgradeneeded = () => {
@@ -34,9 +34,13 @@ describe('openDb schema upgrade', () => {
 
     const store = await import('./store.js');
 
-    // All three pre-existing stores must survive untouched and still work.
+    // The three pre-existing stores must survive untouched and still work.
     await expect(store.getActiveIds()).resolves.toEqual([]);
     await expect(store.getLastSyncedAt()).resolves.toBeNull();
     await expect(store.getIgnoredSenders()).resolves.toEqual([]);
+    // The three v3 stores must have been newly created in the same upgrade.
+    await expect(store.getContactedAddresses()).resolves.toEqual([]);
+    await expect(store.getTrashedSenders()).resolves.toEqual([]);
+    await expect(store.getScannedSentIds()).resolves.toEqual([]);
   });
 });

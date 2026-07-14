@@ -56,19 +56,36 @@ export async function withRetry(fn, attempts = 4) {
   }
 }
 
-// Yields one page (up to 500) of INBOX message ids at a time, rather than
-// paging through the whole mailbox before returning anything, so callers
-// (sync.js) can interleave metadata-fetching with listing instead of
-// waiting for the full inbox listing to finish first.
-export async function* listInboxMessagePages() {
+// Yields one page (up to 500) of message ids at a time, rather than paging
+// through the whole mailbox before returning anything, so callers (sync.js)
+// can interleave metadata-fetching with listing instead of waiting for the
+// full listing to finish first. Shared by both the INBOX and SENT scans
+// below -- only the label differs.
+async function* listMessagePages(labelId) {
   let pageToken;
   do {
-    const params = new URLSearchParams({ labelIds: 'INBOX', maxResults: '500' });
+    const params = new URLSearchParams({ labelIds: labelId, maxResults: '500' });
     if (pageToken) params.set('pageToken', pageToken);
     const data = await withRetry(() => gmailFetch(`/messages?${params}`));
     pageToken = data.nextPageToken;
     yield (data.messages || []).map((m) => m.id);
   } while (pageToken);
+}
+
+export function listInboxMessagePages() {
+  return listMessagePages('INBOX');
+}
+
+export function listSentMessagePages() {
+  return listMessagePages('SENT');
+}
+
+function extractHeaders(data) {
+  const headers = {};
+  for (const h of (data.payload && data.payload.headers) || []) {
+    headers[h.name.toLowerCase()] = h.value;
+  }
+  return headers;
 }
 
 export async function getMessageMetadata(id) {
@@ -77,10 +94,7 @@ export async function getMessageMetadata(id) {
   params.append('metadataHeaders', 'Subject');
   params.append('metadataHeaders', 'Date');
   const data = await gmailFetch(`/messages/${id}?${params}`);
-  const headers = {};
-  for (const h of (data.payload && data.payload.headers) || []) {
-    headers[h.name.toLowerCase()] = h.value;
-  }
+  const headers = extractHeaders(data);
   return {
     id: data.id,
     sizeEstimate: data.sizeEstimate || 0,
@@ -89,6 +103,20 @@ export async function getMessageMetadata(id) {
     date: headers.date || null,
     snippet: data.snippet || '',
   };
+}
+
+// Used by sync.js's Sent-mail scan phase to build the "addresses I've ever
+// emailed" set (see store.js's recordSentMessageRecipients). Returns raw
+// header text, not parsed addresses -- same division of responsibility as
+// getMessageMetadata's `from`, where address parsing stays store.js's job.
+// Same 20-unit quota cost as getMessageMetadata (same endpoint).
+export async function getMessageRecipients(id) {
+  const params = new URLSearchParams({ format: 'metadata' });
+  params.append('metadataHeaders', 'To');
+  params.append('metadataHeaders', 'Cc');
+  const data = await gmailFetch(`/messages/${id}?${params}`);
+  const headers = extractHeaders(data);
+  return { id: data.id, to: headers.to || null, cc: headers.cc || null };
 }
 
 export async function trashMessages(ids) {

@@ -21,11 +21,17 @@ npm run build       # production build to dist/
 npm run preview     # serve dist/ at http://localhost:5500
 ```
 
-There is no test suite. `npm run build` is the fastest way to catch
-JSX/import mistakes without a browser (Rollup fails loudly on those);
-beyond that, most of what can go wrong here (OAuth config, Gmail API
-errors, IndexedDB behavior) only surfaces at runtime in a real browser
-devtools console/network tab, not via any static check.
+`npm test` (Vitest) runs the test suite; `npx vitest run --coverage`
+enforces this repo's 100%-statement/branch/function/line threshold on
+every file except `src/lib/store.js`, which has one pre-existing,
+practically-unreachable gap (`promisifyRequest`'s `onerror` callback —
+IndexedDB reports request-level errors synchronously for every valid-input
+call pattern this file's tests can drive, without reaching into
+`fake-indexeddb` internals to force it). `npm run build` is the fastest
+way to catch JSX/import mistakes without a browser (Rollup fails loudly
+on those); beyond that, most of what can go wrong here (OAuth config,
+Gmail API errors, IndexedDB behavior) only surfaces at runtime in a real
+browser devtools console/network tab, not via any static check.
 
 ## Why this shape
 
@@ -86,44 +92,91 @@ rationale of each; only the module boundaries changed):
    block programmatic popups otherwise. There is no refresh token; when
    the ~1hr access token expires the user just signs in again.
 2. **`gmailApi.js`** — thin, stateless wrapper over
-   `gmail.googleapis.com`: `listInboxMessagePages` is an async generator
-   that `yield`s one `messages.list` page (up to 500 ids) at a time
-   instead of paging through the whole mailbox and returning one final
-   array — that's what lets `sync.js` interleave fetching with listing;
-   `getMessageMetadata` fetches one message's `messages.get?format=metadata`
-   (sender/subject/date/size/snippet); `trashMessages` calls
-   `messages.batchModify` (chunked at 1000 ids, the API's per-call cap).
-   `withRetry` backs off on HTTP 429. `gmailFetch`'s success path reads
-   the response as text and only `JSON.parse`s it if non-empty —
-   `messages.batchModify` returns an empty body on success, and
-   `res.json()` on empty text throws `Unexpected end of JSON input` even
-   though the request succeeded. This file has no notion of a
+   `gmail.googleapis.com`: `listInboxMessagePages`/`listSentMessagePages`
+   are both thin wrappers over a private `listMessagePages(labelId)` async
+   generator (`labelIds=INBOX` / `labelIds=SENT`) that `yield`s one
+   `messages.list` page (up to 500 ids) at a time instead of paging
+   through the whole mailbox and returning one final array — that's what
+   lets `sync.js` interleave fetching with listing, for both the inbox and
+   Sent phases. `getMessageMetadata` fetches one message's
+   `messages.get?format=metadata` (sender/subject/date/size/snippet, used
+   by the inbox phase); `getMessageRecipients` fetches the same endpoint
+   but for `To`/`Cc` only (used by the Sent-scan phase, same 20-unit quota
+   cost as `getMessageMetadata` — same endpoint), returning raw header
+   text rather than parsed addresses (address parsing stays `store.js`'s
+   job, same division of responsibility as `getMessageMetadata`'s `from`).
+   `trashMessages` calls `messages.batchModify` (chunked at 1000 ids, the
+   API's per-call cap). `withRetry` backs off on HTTP 429. `gmailFetch`'s
+   success path reads the response as text and only `JSON.parse`s it if
+   non-empty — `messages.batchModify` returns an empty body on success,
+   and `res.json()` on empty text throws `Unexpected end of JSON input`
+   even though the request succeeded. This file has no notion of a
    multi-message "job" — that's `sync.js`'s job, so pause/resume/restart
-   has somewhere to hook in.
+   has somewhere to hook in. No new OAuth scope was needed for Sent access
+   — `gmail.modify` already covers reading `SENT`-labeled mail.
 3. **`store.js`** — the entire data layer, backed by IndexedDB (the
-   `gmailCleaner` database, version 2: a `messages` object store keyed by
-   message id, a `meta` store for `lastSyncedAt`, and an `ignoredSenders`
-   store keyed by email) rather than sessionStorage — deliberately, so
-   data survives tab closes/restarts and isn't capped at sessionStorage's
-   ~5-10MB. Every exported function here is `async`/returns a Promise —
-   callers in `sync.js`/`App.jsx` all `await` them. `markGone` does a
-   read-modify-write per id (`store.get` then `store.put`) since
-   IndexedDB has no partial-update operation. `deleted: true` is the
-   soft-delete marker used for both already-trashed and no-longer-in-INBOX
-   messages. `getTopSenders` groups/sums in JS over a full `getAll()` scan
-   on every call (cheap at personal-mailbox scale, no maintained index),
-   skips any sender in `getIgnoredSenders()` up front (rather than
-   filtering the finished list after building it — cheaper, and it means
-   an ignored sender's rows never even get a `latestMessage`/`ids`
-   computed), and also tracks each sender's `latestMessage` (by parsed
-   `Date` header) for the hover-preview feature. `clearAllData` (backing
-   the "Clear Data" button) only `.clear()`s the `messages` and `meta`
-   stores — it deliberately leaves `ignoredSenders` alone, since ignoring
-   a sender is a standing preference, not sync progress; wiping it on
-   every reset would make an ignored sender reappear on the very next
-   sync. Also owns RFC 2047 decoding (`decodeMimeWords`): the Gmail API
-   returns raw header text, encoded words and all, it does not decode
-   them server-side.
+   `gmailCleaner` database, version 3: `messages` keyed by message id,
+   `meta` for `lastSyncedAt`, `ignoredSenders` keyed by email, and three
+   v3 additions — `contactedAddresses` (every address ever sent-TO/CC'd,
+   keyed by email), `trashedSenders` (senders manually Move-to-Trash'd via
+   this app, keyed by email), and `scannedSentIds` (Sent message ids
+   already scanned, keyed by id) — all three added the same
+   `if (!db.objectStoreNames.contains(...))` way as the original three)
+   rather than sessionStorage — deliberately, so data survives tab
+   closes/restarts and isn't capped at sessionStorage's ~5-10MB. Every
+   exported function here is `async`/returns a Promise — callers in
+   `sync.js`/`App.jsx` all `await` them. `markGone` does a read-modify-write
+   per id (`store.get` then `store.put`) since IndexedDB has no
+   partial-update operation. `deleted: true` is the soft-delete marker
+   used for both already-trashed and no-longer-in-INBOX messages. The
+   per-message grouping loop that was originally `getTopSenders`'s own
+   body is now a private `aggregateBySender(messages, excludeEmails)`
+   helper, shared with `getCleanupSuggestions` (see Cleanup Suggestions
+   below) — a pure extraction, so `getTopSenders`'s own behavior/tests are
+   unaffected. It groups/sums in JS over a full `getAll()` scan on every
+   call (cheap at personal-mailbox scale, no maintained index), skips any
+   excluded (ignored) sender up front (rather than filtering the finished
+   list after building it — cheaper, and it means an ignored sender's rows
+   never even get a `latestMessage`/`ids` computed), and also tracks each
+   sender's `latestMessage` (by parsed `Date` header, kept internally as
+   `latestTimestamp` too — reused by `getCleanupSuggestions`'s age
+   comparison) for the hover-preview feature. `clearAllData` (backing the
+   "Clear Data" button) only `.clear()`s the `messages` and `meta` stores
+   — it deliberately leaves `ignoredSenders` *and* all three v3 stores
+   alone, since all four are standing facts/preferences, not sync
+   progress; wiping `contactedAddresses`/`scannedSentIds` in particular
+   would force an expensive full Sent-folder rescan even though "did I
+   ever email X" never goes stale once true. Also owns RFC 2047 decoding
+   (`decodeMimeWords`): the Gmail API returns raw header text, encoded
+   words and all, it does not decode them server-side.
+
+   **`parseAddressListHeader(raw)`** parses a To/Cc header (which, unlike
+   From, can carry several comma-separated addresses) into an array of
+   lowercased emails. It's a quote-aware comma splitter (tracks whether
+   it's inside a `"..."` display name so a literal comma there, e.g.
+   `"Doe, Jane" <jane@x.com>, john@y.com`, doesn't cause a false split)
+   feeding each resulting token through the existing single-address
+   `parseFromHeader` rather than duplicating its angle-bracket/RFC-2047
+   logic.
+
+   **`getCleanupSuggestions(thresholdYears)`** is the query behind the
+   Cleanup Suggestions tab — see that section below for the full
+   criteria/rationale. It's always a subset of `getTopSenders()`'s result
+   (same `aggregateBySender` call, same ignored-exclusion, just an
+   additional filter), which the UI layer relies on (see Tabs and shared
+   selection below).
+
+   **Sent-scan bookkeeping**: `addContactedAddresses`/`getContactedAddresses`,
+   `getScannedSentIds`, `recordTrashedSenders`/`getTrashedSenders` mirror
+   the existing `ignoreSender`/`getIgnoredSenders` shape (bulk-write-only,
+   like `upsertMessages` — no singular `recordTrashedSender`, and
+   deliberately no "un-trash" function, since that judgment is meant to be
+   permanent). `recordSentMessageRecipients({ id, to, cc })` (called once
+   per fetched Sent message by `sync.js`'s Sent-phase worker) parses To+Cc
+   via `parseAddressListHeader`, writes any new addresses, *then* marks the
+   id scanned — in that order, so a job superseded between the two writes
+   only risks a harmless re-scan of that id next time, never a silently
+   lost "did I ever email X" fact.
 4. **`sync.js`** — the resumable sync job controller (pause / resume /
    restart / real-time progress). A single module-level `job` object is
    the whole mechanism: starting a new sync (`startSync`, used by both
@@ -148,52 +201,100 @@ rationale of each; only the module boundaries changed):
    pushing newly-seen ids onto `myJob.queue`, while a fixed pool of
    `METADATA_FETCH_CONCURRENCY` `fetchWorker`s drains that queue as fast
    as quota allows — listing page 4 can be in flight while a worker is
-   still fetching metadata for something found on page 1. `runJob` is
-   what launches both sides together via `Promise.all` and is called by
-   both `startSync` and `resumeSync` (pausing stops every loop below it,
-   so resuming has to relaunch the whole pipeline, not just the workers).
-   An idle `fetchWorker` (queue momentarily empty but listing not done)
-   polls every `IDLE_POLL_MS` (150ms) rather than waiting on an explicit
+   still fetching metadata for something found on page 1. `runInboxPipeline`
+   is what launches both sides together via `Promise.all`. An idle
+   `fetchWorker` (queue momentarily empty but listing not done) polls
+   every `IDLE_POLL_MS` (150ms) rather than waiting on an explicit
    wake-up signal — deliberately simple: an event-based signal would need
    its own cleanup path for a worker left waiting when a job gets
    superseded mid-wait, whereas a poll loop just re-checks `job !== myJob`
    on its own next tick and exits cleanly either way. `pauseSync` just
    flips `job.status`; both `listingLoop` and every `fetchWorker` check it
    at the top of their loop and exit (leaving `myJob.queue` and the
-   listing generator's internal `pageToken` closure intact), so
-   `resumeSync`'s call into `runJob` picks up exactly where it left off —
-   including mid-page for the listing side. One consequence of listing
-   and fetching happening concurrently: `total` (the denominator shown in
-   the UI) grows as more pages are listed rather than being known
-   upfront, since new ids are only discovered one page at a time —
-   `listingDone` in the snapshot tells the UI whether that number is
-   still likely to grow, and there's no separate "listing" vs "fetching"
-   phase to show in status text anymore since both are always happening
-   at once while `status === 'running'`. `resetSync()` (backing "Clear
-   Data") just sets `job = null`, reusing the exact same staleness-check
-   mechanism as a fresh `startSync()` supersession — every in-flight
-   check already compares against the old job reference, which can never
-   equal `null`, so no separate cancellation path was needed.
+   listing generator's internal `pageToken` closure intact), so resuming
+   picks up exactly where it left off — including mid-page for the
+   listing side. One consequence of listing and fetching happening
+   concurrently: `total` (the denominator shown in the UI) grows as more
+   pages are listed rather than being known upfront, since new ids are
+   only discovered one page at a time — `listingDone` in the snapshot
+   tells the UI whether that number is still likely to grow, and there's
+   no separate "listing" vs "fetching" distinction to show in status text
+   *within* a phase, since both are always happening at once while
+   `status === 'running'`. `resetSync()` (backing "Clear Data") just sets
+   `job = null`, reusing the exact same staleness-check mechanism as a
+   fresh `startSync()` supersession — every in-flight check already
+   compares against the old job reference, which can never equal `null`,
+   so no separate cancellation path was needed.
+
+   **Two sequential phases, not one.** A job runs `phase: 'inbox'` (as
+   above) and then `phase: 'sent'` — an analogous producer/consumer
+   pipeline (`sentListingLoop`/`sentFetchWorker`, mirroring
+   `listingLoop`/`fetchWorker` exactly, including the same `job !== myJob`
+   staleness checks after every `await`) that scans Sent mail to build the
+   "addresses I've ever emailed" set behind Cleanup Suggestions (see
+   `store.js`'s `recordSentMessageRecipients` above). `runJob`'s
+   `if (myJob.phase === 'inbox') { ...; myJob.phase = 'sent'; }` block only
+   executes once per job (the goneIds reconciliation inside it must not
+   re-run on a Sent-phase resume), then falls through unconditionally into
+   `runSentPipeline`. Unlike the inbox phase, Sent has no gone-id
+   reconciliation to do — Sent mail only grows, and "did I ever email X"
+   never becomes stale once true, so there's nothing to detect as removed.
+   **The two phases never run concurrently with each other** — the Sent
+   phase's worker pool isn't even started until the inbox phase's own
+   `Promise.all` has resolved — which is what keeps this within Gmail's
+   quota ceiling (see Gmail API quota below); running
+   `METADATA_FETCH_CONCURRENCY` workers for *both* phases at once would
+   double the effective `messages.get` rate. `getScannedSentIds()` is
+   fetched once up front in `startSync` (alongside `getActiveIds()`, in
+   the same `Promise.all`) exactly like `knownIds`, so a later
+   pause/resume of the Sent phase never needs to re-derive it.
+   `getSyncSnapshot()` reuses the same `total`/`fetched`/`listedCount`/
+   `listingDone` field names for both phases (reading from the Sent-phase
+   job fields once `job.phase === 'sent'`) rather than adding
+   phase-prefixed fields — that's what lets `SyncControls.jsx`'s progress
+   bar work unchanged for both phases; only its status text branches on
+   the new `phase` field, and is written so `phase === undefined` (every
+   snapshot from before this existed) falls through to the original
+   inbox-only wording.
 
 **`src/components/` and `src/App.jsx`**:
 - **`App.jsx`** — the only component holding real application state
-  (`clientId`, `signedIn`, `syncSnapshot`, `senders`, `lastSyncedAt`,
-  `ignoredSenders`). `refreshSenders`/`refreshIgnored`/`refreshAll` wrap
-  `store.js`'s reads with `setState`; `refreshSenders` guards against
-  out-of-order resolution with a `refreshTokenRef` counter (a `useRef`
-  incremented per call, discarding results from calls that were
-  superseded before they resolved) — necessary because IndexedDB reads
-  are async and `handleSyncUpdate` fires once per synced message without
-  awaiting the refresh, so a slower/older read could otherwise resolve
-  after a newer one and flash stale data. `refreshIgnored` is kept
-  separate from `refreshSenders` (composed together only via
-  `refreshAll`) so the ignored list isn't re-queried on every one of
-  those rapid-fire sync ticks — it can't change mid-sync, so
+  (`clientId`, `signedIn`, `syncSnapshot`, `senders`, `cleanupSuggestions`,
+  `cleanupThresholdYears`, `lastSyncedAt`, `ignoredSenders`).
+  `refreshSenders`/`refreshIgnored`/`refreshAll` wrap `store.js`'s reads
+  with `setState`; `refreshSenders` guards against out-of-order resolution
+  with a `refreshTokenRef` counter (a `useRef` incremented per call,
+  discarding results from calls that were superseded before they
+  resolved) — necessary because IndexedDB reads are async and
+  `handleSyncUpdate` fires once per synced message without awaiting the
+  refresh, so a slower/older read could otherwise resolve after a newer
+  one and flash stale data. `refreshSenders` now fetches both
+  `getTopSenders()` and `getCleanupSuggestions(threshold)` in the same
+  `Promise.all` under that one guard — it reads the current threshold via
+  a `cleanupThresholdYearsRef` (kept in sync with `cleanupThresholdYears`
+  state by its own small effect) rather than closing over the state value
+  directly, since `refreshSenders` has an empty dependency array (it must
+  stay referentially stable — `sync.js`'s `startSync`/`resumeSync` are
+  handed `handleSyncUpdate`, which closes over it, mid-job) and a `useRef`
+  is the standard way to let a stable callback read a "current" value.
+  `handleThresholdYearsChange` (the years-input's `onChange` handler)
+  deliberately does *not* go through that ref — it calls
+  `getCleanupSuggestions(value)` directly with the new value so it can't
+  race the ref's own sync effect (which wouldn't have flushed to the ref
+  yet on the same tick), reusing the same `refreshTokenRef` guard so a
+  slower stale call still can't clobber a faster newer one.
+  `refreshIgnored` is kept separate from `refreshSenders` (composed
+  together only via `refreshAll`) so the ignored list isn't re-queried on
+  every one of those rapid-fire sync ticks — it can't change mid-sync, so
   `handleSyncUpdate` calls `refreshSenders` alone. All the actual
   mutating operations (`handleTrash`, `handleIgnore`, `handleUnignore`,
   `handleClearData`) live here too, passed down as props — child
   components own *only* their local/presentational state (row-level
   `busy` flags, sort/filter state), never call `src/lib/` directly.
+  `handleTrash`/`handleTrashSelected` call `recordTrashedSenders` (see
+  `store.js` above) *before* `markGone`/`refreshSenders`, so the "this
+  sender was manually trashed" fact is durably written even if something
+  later in that chain fails.
 - **`AuthControls.jsx`** — Client ID input + sign in/out, purely
   presentational (controlled input, no local state).
 - **`SyncControls.jsx`** — Sync Now/Pause/Resume/Restart/Clear Data
@@ -210,18 +311,55 @@ rationale of each; only the module boundaries changed):
   concurrently (see `sync.js` below), `total` can still be climbing while
   the bar is drawn, so a solid fill would misleadingly imply the
   percentage shown is final when it might not be.
-- **`SendersTable.jsx`** — owns column sort and filter state locally
-  (see below) since neither needs to be known outside this component;
-  computes the filtered+sorted list via `useMemo`. `SenderRow` (defined
-  in the same file, not exported) owns a local `busy` flag per row for
-  the Ignore/Trash buttons — set before calling the `onTrash`/`onIgnore`
-  prop and *not* reset in the success path, since a successful
-  trash/ignore removes that sender from the parent's list and unmounts
-  the row; only the `catch` branch resets `busy`, since that's the only
-  outcome where the row still exists afterward. The hover preview is a
-  native `title` attribute (see Notes and limitations in the README for
-  why); clicking the sender cell opens
+- **`SendersTable.jsx`** — reused for both the All Senders and Cleanup
+  Suggestions tabs (see Tabs and shared selection below), so it's no
+  longer senders-ranking-specific despite the name. Owns column sort and
+  filter state locally (see below) since neither needs to be known
+  outside this component; computes the filtered+sorted list via
+  `useMemo`. Selection, by contrast, is a **controlled prop**
+  (`selected: Set<string>`, `onToggleSelect(email)`,
+  `onToggleSelectAll(visibleSenders)`) rather than local state — it lives
+  in the parent (`SendersSection.jsx`) because two instances of this
+  table share one selection Set and one "Move to Trash" toolbar (this is
+  also why there's no `onTrashSelected` prop here anymore; the bulk-trash
+  confirm/busy/error handling moved to `SendersSection.jsx` too).
+  `storageKeyPrefix` (e.g. `'gmailCleaner.senders'` vs
+  `'gmailCleaner.cleanupSuggestions'`) is what lets the two tab instances
+  persist independent sort/filter choices without clobbering each other's
+  `localStorage` keys — passing `'gmailCleaner.senders'` for the All
+  Senders instance reproduces the exact keys this component used before
+  it was split into two, so no prior user's persisted prefs are lost. An
+  optional `noDataMessage` prop overrides the empty-state text shown when
+  there's no data at all (as opposed to "filters matched nothing," which
+  is always the same wording) — All Senders points it at the "Sign in..."
+  copy, Cleanup Suggestions at "No cleanup suggestions right now."
+  `SenderRow` (defined in the same file, not exported) owns a local
+  `busy` flag per row for the Ignore/Trash buttons — set before calling
+  the `onTrash`/`onIgnore` prop and *not* reset in the success path,
+  since a successful trash/ignore removes that sender from the parent's
+  list and unmounts the row; only the `catch` branch resets `busy`, since
+  that's the only outcome where the row still exists afterward. The hover
+  preview is a native `title` attribute (see Notes and limitations in the
+  README for why); clicking the sender cell opens
   `https://mail.google.com/mail/u/0/#search/from:<email>` in a new tab.
+- **`SendersSection.jsx`** — owns the shared `selected` Set + `bulkBusy` +
+  the "Move to Trash" toolbar (moved here from `SendersTable.jsx`) and the
+  All Senders / Cleanup Suggestions tab switcher (active tab persisted to
+  `localStorage['gmailCleaner.sendersActiveTab']`). Only the active tab's
+  `SendersTable` is mounted at a time (conditional render, not
+  both-mounted-and-hidden) — losing the unpersisted `page` on tab switch
+  is fine, since sort/filter reload from storage regardless. `selected`
+  being a single Set keyed by email, shared across both tab instances, is
+  what makes "one toolbar above two tabs" coherent instead of surprising:
+  a sender checked while viewing one tab stays checked (and counted in
+  the toolbar) if they also appear in the other. Resolving selected
+  emails against `senders` (not `cleanupSuggestions`) is always
+  sufficient for the bulk-trash call, since `getCleanupSuggestions()` is
+  provably a subset of `getTopSenders()` (see `store.js` above). Also
+  renders the Cleanup Suggestions tab's years-threshold `<input
+  type="number">` (validated inline — non-finite or negative input is
+  silently ignored rather than propagated, same "permissive, no error UI"
+  philosophy as the column filters below).
 - **`IgnoredSendersList.jsx`** — same per-item `busy`-flag pattern as
   `SenderRow`, for the same reason (a successful Unignore removes the
   item from the list).
@@ -237,10 +375,11 @@ rationale of each; only the module boundaries changed):
 `asc -> desc -> null` (the third state sets `column` to `null` too, not
 just `direction`, so the *next* click on any header cleanly starts a new
 `asc` sort rather than resuming stale column state). When `column` is
-`null`, the `useMemo` falls back to `getTopSenders()`'s natural order,
-which is already total-size descending — that's why "unsorted" and
-"initial load" look identical; they're deliberately the same code path,
-not two implementations of the same default.
+`null`, the `useMemo` falls back to the `senders` prop's natural order,
+which both `getTopSenders()` and `getCleanupSuggestions()` already return
+as total-size descending — that's why "unsorted" and "initial load" look
+identical; they're deliberately the same code path, not two
+implementations of the same default, for either tab.
 
 ### Column filtering
 
@@ -264,8 +403,11 @@ match."
 
 ### Sort/filter persistence
 
-`sortState` and `filters` are both remembered in `localStorage`
-(`gmailCleaner.sendersSort` / `gmailCleaner.sendersFilters`) — same
+`sortState` and `filters` are both remembered in `localStorage`, under
+keys derived from the `storageKeyPrefix` prop (`gmailCleaner.sendersSort`
+/ `gmailCleaner.sendersFilters` for the All Senders instance,
+`gmailCleaner.cleanupSuggestionsSort` / `...Filters` for the Cleanup
+Suggestions instance — the two tabs' choices are independent) — same
 "public, non-secret, convenience only" treatment as the OAuth Client ID
 in `auth.js` (see Credential handling), just scoped to UI preference
 instead of a credential. `loadStoredSort`/`loadStoredFilters` are used as
@@ -303,7 +445,50 @@ changes. `SendersTable`'s "select all" checkbox is scoped to
 `pagedSenders` (the current page), not the full filtered/sorted list —
 selecting across pages would silently bulk-trash senders the user never
 saw checked, so it follows the same per-page convention as Gmail's own
-inbox.
+inbox. Since selection is now a controlled prop (see Tabs and shared
+selection below), the header checkbox reports this scoping by calling
+`onToggleSelectAll(pagedSenders)` rather than mutating any state itself.
+
+### Cleanup Suggestions
+
+The tab surfaces senders worth bulk-cleaning: people the user has never
+emailed or replied to (not in `contactedAddresses`) whose most recent
+message is older than a user-configurable number of years
+(`cleanupThresholdYears`, `App.jsx` state, default 2, persisted to
+`localStorage['gmailCleaner.cleanupThresholdYears']`), **or** anyone the
+user has previously used "Move to Trash" on via this app before
+(`trashedSenders`), regardless of how recently they've emailed —
+`store.js`'s `getCleanupSuggestions(thresholdYears)` has the exact
+filter/rationale. The years input is a plain controlled `<input
+type="number">` in `SendersSection.jsx` rather than a permissive
+raw-string-plus-parse layer like the column filters — the threshold is a
+required, always-active value with a sane default rather than an
+optional "narrow further" filter, so the simpler direct-`Number`-plus-
+range-check validation is enough. Ignored senders are excluded from
+Cleanup Suggestions too, same as All Senders (consistent "ignore =
+invisible everywhere" semantics) — this falls out for free since both
+tabs' data comes from the same `aggregateBySender` exclusion in
+`store.js`.
+
+### Tabs and shared selection
+
+`SendersSection.jsx` renders a `role="tablist"` switcher between two
+`SendersTable.jsx` instances (`storageKeyPrefix="gmailCleaner.senders"`
+fed `senders`, `storageKeyPrefix="gmailCleaner.cleanupSuggestions"` fed
+`cleanupSuggestions`) and owns the selection Set + "Move to Trash"
+toolbar that sits above both. Only the active tab is mounted — switching
+tabs doesn't lose sort/filter (both reload from their own `localStorage`
+keys) but does lose the unpersisted current page, which is an accepted
+tradeoff for the simplicity of not keeping both tab bodies alive at once.
+Selection is keyed by email in a single shared `Set`, so a sender checked
+on one tab stays checked (and counted in the toolbar) if the same email
+also appears on the other — this is what makes one toolbar spanning two
+tabs coherent rather than surprising, and it's safe specifically because
+`getCleanupSuggestions()` is provably a subset of `getTopSenders()` (see
+`store.js` above): resolving a selected email against `senders` alone
+(never `cleanupSuggestions`) is always sufficient to find the sender
+object needed for the bulk-trash call, no matter which tab the checkbox
+was actually clicked on.
 
 ## Gmail API quota (why the sync loop looks the way it does)
 
@@ -316,7 +501,13 @@ calling `messages.trash` per id). `gmailApi.js`'s
 `sync.js`'s worker pool) are tuned to this, not guessed — don't raise
 concurrency without accounting for the per-minute cap, and don't remove
 the retry logic, since large first-syncs are expected to occasionally
-hit 429 by design rather than a bug.
+hit 429 by design rather than a bug. `getMessageRecipients` (the Sent
+phase) costs the same 20 units as `getMessageMetadata` per call, so a
+first-time sync's worst-case time roughly doubles now that it also scans
+the entire Sent folder — this is deliberately paid once, though: the
+Sent phase is incremental (`scannedSentIds`), so a mailbox that's already
+been fully scanned only pays for genuinely new Sent messages on
+subsequent syncs, same as the inbox phase already did for INBOX mail.
 
 ## IndexedDB transaction lifetime (a real gotcha if you edit `store.js`)
 
