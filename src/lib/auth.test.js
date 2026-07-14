@@ -29,7 +29,35 @@ function installGoogleMock() {
 
 beforeEach(() => {
   sessionStorage.clear();
+  localStorage.clear();
   delete window.google;
+});
+
+describe('Client ID persistence', () => {
+  it('getStoredClientId is empty with nothing remembered', async () => {
+    const auth = await loadAuth();
+    expect(auth.getStoredClientId()).toBe('');
+  });
+
+  it('picks up a Client ID already remembered in localStorage at load time', async () => {
+    localStorage.setItem('gmailCleaner.clientId', 'remembered-id');
+    const auth = await loadAuth();
+    expect(auth.getStoredClientId()).toBe('remembered-id');
+  });
+
+  it('setCurrentClientId writes the value through to localStorage', async () => {
+    const auth = await loadAuth();
+    auth.setCurrentClientId('client-123');
+    expect(auth.getStoredClientId()).toBe('client-123');
+    expect(localStorage.getItem('gmailCleaner.clientId')).toBe('client-123');
+  });
+
+  it('setCurrentClientId("") clears the remembered value from localStorage', async () => {
+    const auth = await loadAuth();
+    auth.setCurrentClientId('client-123');
+    auth.setCurrentClientId('');
+    expect(localStorage.getItem('gmailCleaner.clientId')).toBeNull();
+  });
 });
 
 describe('isSignedIn / stored token expiry', () => {

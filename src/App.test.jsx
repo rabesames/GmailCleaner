@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 
 vi.mock('./lib/auth.js', () => ({
   setCurrentClientId: vi.fn(),
+  getStoredClientId: vi.fn().mockReturnValue(''),
   isSignedIn: vi.fn().mockReturnValue(false),
   signOut: vi.fn(),
   getAccessToken: vi.fn().mockResolvedValue('token'),
@@ -31,7 +32,7 @@ vi.mock('./lib/gmailApi.js', () => ({
   trashMessages: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { setCurrentClientId, isSignedIn, signOut, getAccessToken } from './lib/auth.js';
+import { setCurrentClientId, getStoredClientId, isSignedIn, signOut, getAccessToken } from './lib/auth.js';
 import { getTopSenders, getLastSyncedAt, getIgnoredSenders, ignoreSender, unignoreSender, markGone, clearAllData } from './lib/store.js';
 import { startSync, pauseSync, resumeSync, resetSync, getSyncSnapshot } from './lib/sync.js';
 import { trashMessages } from './lib/gmailApi.js';
@@ -43,6 +44,7 @@ function sender(overrides = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  getStoredClientId.mockReturnValue('');
   isSignedIn.mockReturnValue(false);
   getSyncSnapshot.mockReturnValue({ status: 'idle' });
   getTopSenders.mockResolvedValue([]);
@@ -81,6 +83,12 @@ describe('Client ID', () => {
     render(<App />);
     await userEvent.type(screen.getByPlaceholderText('Google OAuth Client ID'), 'x');
     expect(setCurrentClientId).toHaveBeenCalledWith('x');
+  });
+
+  it('pre-fills the input from auth.js\'s remembered Client ID on mount', () => {
+    getStoredClientId.mockReturnValue('remembered-client-id');
+    render(<App />);
+    expect(screen.getByPlaceholderText('Google OAuth Client ID')).toHaveValue('remembered-client-id');
   });
 });
 

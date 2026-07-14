@@ -9,8 +9,9 @@ There is no backend. This is a static site built with [Vite](https://vite.dev/)
 `gmail.googleapis.com`, authenticated with your own Google sign-in.
 Synced message data lives in this browser's IndexedDB and persists across
 sessions (so you're not re-syncing your whole inbox every time you open
-the app); your OAuth Client ID and access token remain intentionally
-ephemeral — see [Notes and limitations](#notes-and-limitations).
+the app); your OAuth Client ID is remembered in `localStorage` for
+convenience, while your access token remains intentionally ephemeral —
+see [Notes and limitations](#notes-and-limitations).
 
 Note: This is currently published at https://gmail-cleaner.abesames.org/ - fully usable, all data remains on the user's side 
 
@@ -69,9 +70,9 @@ host works for `dist/` too, as long as its origin is likewise registered.
 
 1. Paste your **Google OAuth Client ID** into the field at the top, then
    click **Sign in with Google** and approve access for your account.
-   The Client ID lives only in that input field for as long as the page
-   is open — it's read fresh each time it's needed and never written to
-   `sessionStorage`, `localStorage`, or disk.
+   It's a public, non-secret identifier, so it's remembered in
+   `localStorage` and pre-filled the next time you open the app — you
+   only need to paste it in once per browser.
 2. Click **Sync Now**. This lists your INBOX (`messages.list`, up to 500
    ids per page) and fetches sender/subject/date/size/snippet
    (`messages.get`, `format=metadata`) for not-yet-stored messages
@@ -125,14 +126,15 @@ host works for `dist/` too, as long as its origin is likewise registered.
 
 ## Notes and limitations
 
-- **Message data persists across sessions; credentials don't.** Synced
-  mail metadata is kept in this browser's IndexedDB (`gmailCleaner`
-  database) and survives closing the tab or restarting the browser — a
-  deliberate exception to how everything else in this app behaves. Your
-  OAuth Client ID is never stored anywhere (re-enter it each page load),
-  and your access token lives only in `sessionStorage` (cleared when the
-  tab closes, ~1hr lifetime regardless). To fully reset, clear this
-  site's data via your browser's DevTools (Application → IndexedDB) or
+- **Message data and your Client ID persist across sessions; your access
+  token doesn't.** Synced mail metadata is kept in this browser's
+  IndexedDB (`gmailCleaner` database) and your OAuth Client ID is kept
+  in `localStorage` (`gmailCleaner.clientId`) — both survive closing the
+  tab or restarting the browser. Your access token lives only in
+  `sessionStorage` (cleared when the tab closes, ~1hr lifetime
+  regardless) since, unlike the Client ID, it's a live credential rather
+  than a public identifier. To fully reset, clear this site's data via
+  your browser's DevTools (Application → IndexedDB/Local Storage) or
   site settings — closing the tab is no longer enough.
 - **Gmail API quota**: each account is limited to 6,000 quota units per
   minute. `messages.get` costs 20 units, capping metadata fetches at

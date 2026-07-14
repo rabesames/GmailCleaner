@@ -3,21 +3,32 @@
 // scoped to gmail.modify, and kept only in sessionStorage -- cleared the
 // moment this tab closes. There is no refresh token and nothing server-side.
 //
-// The OAuth Client ID itself is never written to sessionStorage/localStorage
-// -- only the resulting access token is cached, same treatment as the old
-// IMAP password. `setCurrentClientId` is called by the React input's
-// onChange handler to keep this module's copy in sync with the controlled
+// The OAuth Client ID is a public, non-secret identifier, so it's cached in
+// localStorage (write-through on every change) purely for convenience --
+// unlike the access token, it survives closing the browser entirely.
+// `setCurrentClientId` is called by the React input's onChange handler to
+// keep this module's copy (and localStorage) in sync with the controlled
 // input's value; this module never reads the DOM directly.
 const AUTH_STORAGE_KEY = 'gmailCleaner.auth';
+const CLIENT_ID_STORAGE_KEY = 'gmailCleaner.clientId';
 const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
 
-let currentClientId = '';
+let currentClientId = localStorage.getItem(CLIENT_ID_STORAGE_KEY) || '';
 let tokenClient = null;
 let tokenClientId = null;
 let pendingTokenRequests = [];
 
+export function getStoredClientId() {
+  return currentClientId;
+}
+
 export function setCurrentClientId(clientId) {
   currentClientId = clientId;
+  if (clientId) {
+    localStorage.setItem(CLIENT_ID_STORAGE_KEY, clientId);
+  } else {
+    localStorage.removeItem(CLIENT_ID_STORAGE_KEY);
+  }
 }
 
 function ensureTokenClient() {

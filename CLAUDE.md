@@ -8,7 +8,7 @@ A client-side-only React SPA (no backend) that talks to the Gmail REST
 API directly from the browser, ranks senders by total email size, and
 moves a sender's messages to Trash on request. Message data lives in
 this browser's IndexedDB and persists across sessions; the OAuth Client
-ID is never stored anywhere and the access token lives only in
+ID is cached in `localStorage` and the access token lives in
 `sessionStorage` (see Credential handling below). See `README.md` for
 one-time Google Cloud OAuth setup and behavioral notes/limits.
 
@@ -71,13 +71,17 @@ rationale of each; only the module boundaries changed):
    `AuthControls`'s controlled `<input>` can push its value into this
    module on every keystroke — the module keeps its own
    `currentClientId` variable rather than reading a DOM element (there's
-   no DOM element to read in the React version), but the guarantee is
-   identical to before: never written to storage, live value only.
-   `ensureTokenClient()` only re-initializes the underlying
-   `google.accounts.oauth2` client when that value actually changes.
-   `getAccessToken()` returns a cached *token* from `sessionStorage` if
-   still valid (the token, unlike the Client ID, is fine to cache —
-   short-lived and revocable), otherwise calls `requestAccessToken()` —
+   no DOM element to read in the React version). It's a write-through
+   cache: every call also mirrors the value into `localStorage` (key
+   `gmailCleaner.clientId`), and the module initializes `currentClientId`
+   from that same key at load time — `getStoredClientId()` is what
+   `App.jsx` calls for the input's initial React state, so a Client ID
+   entered once is pre-filled on the next visit. `ensureTokenClient()`
+   only re-initializes the underlying `google.accounts.oauth2` client
+   when that value actually changes. `getAccessToken()` returns a cached
+   *token* from `sessionStorage` if still valid (the token, unlike the
+   Client ID, is short-lived and revocable, hence the shorter-lived
+   storage), otherwise calls `requestAccessToken()` —
    which must run from a user-gesture handler (a click), since browsers
    block programmatic popups otherwise. There is no refresh token; when
    the ~1hr access token expires the user just signs in again.
@@ -284,14 +288,16 @@ own `withStore` call first.
 
 Two different things are commonly conflated here — keep them distinct:
 
-- **OAuth Client ID**: never stored anywhere, by explicit design. Lives
-  only as React state in `App.jsx` (for the controlled `<input>`) plus a
-  mirrored copy in `auth.js`'s module-level `currentClientId` (kept in
-  sync via `setCurrentClientId`, called from `AuthControls`'s
-  `onChange`). Don't route this through `sessionStorage`/`localStorage`
-  even though it's technically a public, non-secret identifier — the
-  point is consistency with the rest of the app's "nothing persists"
-  model, not secrecy.
-- **OAuth access token**: fine to cache in `sessionStorage`
-  (`gmailCleaner.auth`) since it's short-lived, scoped, and revocable —
-  this is intentional and different from the Client ID's treatment above.
+- **OAuth Client ID**: cached in `localStorage` (`gmailCleaner.clientId`)
+  since it's a public, non-secret identifier — remembering it across
+  browser restarts is a convenience, not a security concern. Lives as
+  React state in `App.jsx` (for the controlled `<input>`, initialized
+  from `auth.js`'s `getStoredClientId()`) plus a mirrored copy in
+  `auth.js`'s module-level `currentClientId` (kept in sync via
+  `setCurrentClientId`, called from `AuthControls`'s `onChange`, which
+  write-throughs to `localStorage` on every change).
+- **OAuth access token**: cached in `sessionStorage` (`gmailCleaner.auth`)
+  instead, since — unlike the Client ID — it's a live credential:
+  short-lived (~1hr) and revocable, so tying it to the tab's session
+  (cleared on tab close) rather than persisting it indefinitely limits
+  how long a stale token could be replayed.

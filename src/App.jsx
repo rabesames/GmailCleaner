@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { setCurrentClientId, isSignedIn, signOut, getAccessToken } from './lib/auth.js';
+import { setCurrentClientId, getStoredClientId, isSignedIn, signOut, getAccessToken } from './lib/auth.js';
 import { getTopSenders, getLastSyncedAt, getIgnoredSenders, ignoreSender, unignoreSender, markGone, clearAllData } from './lib/store.js';
 import { startSync, pauseSync, resumeSync, resetSync, getSyncSnapshot } from './lib/sync.js';
 import { trashMessages } from './lib/gmailApi.js';
@@ -9,7 +9,7 @@ import SendersTable from './components/SendersTable.jsx';
 import IgnoredSendersList from './components/IgnoredSendersList.jsx';
 
 export default function App() {
-  const [clientId, setClientId] = useState('');
+  const [clientId, setClientId] = useState(() => getStoredClientId());
   const [signedIn, setSignedIn] = useState(isSignedIn());
   const [syncSnapshot, setSyncSnapshot] = useState(getSyncSnapshot());
   const [senders, setSenders] = useState([]);
