@@ -379,7 +379,17 @@ just `direction`, so the *next* click on any header cleanly starts a new
 which both `getTopSenders()` and `getCleanupSuggestions()` already return
 as total-size descending — that's why "unsorted" and "initial load" look
 identical; they're deliberately the same code path, not two
-implementations of the same default, for either tab.
+implementations of the same default, for either tab. The **Latest
+Message** column sorts on `sender.latestTimestamp` — the numeric
+timestamp `aggregateBySender` already tracks internally (see `store.js`
+above) and leaves on the returned entry rather than stripping it, so no
+special-cased sort key extraction was needed (`sender[sortState.column]`
+already resolves it, same generic lookup every other sortable column
+uses). The displayed cell itself is the *formatted* date
+(`formatLatestMessageDate`, date-only — the hover-preview tooltip already
+covers full date+time+subject+snippet, so the column stays compact) with
+a `—` fallback for a sender with no parseable date on any message
+(`latestTimestamp === -Infinity`, which also naturally sorts to one end).
 
 ### Column filtering
 

@@ -99,9 +99,9 @@ requirements below (notably OAuth setup and Gmail API quota limits).
 
 | # | Requirement |
 |---|---|
-| 7.3.1 | The app displays one row per distinct sender (by email address) among all active, non-ignored, synced messages, showing: display name and/or email, message count, and total size. |
+| 7.3.1 | The app displays one row per distinct sender (by email address) among all active, non-ignored, synced messages, showing: display name and/or email, message count, total size, and the date of that sender's most recent message. |
 | 7.3.2 | The grid's default ordering is total size, descending. |
-| 7.3.3 | Each of the Sender, Messages, and Total Size columns must be independently sortable by clicking its header. Each click cycles the column through three states: ascending, descending, then unsorted (back to the default order). |
+| 7.3.3 | Each of the Sender, Messages, Total Size, and Latest Message columns must be independently sortable by clicking its header. Each click cycles the column through three states: ascending, descending, then unsorted (back to the default order). |
 | 7.3.4 | Each column has an independent filter: **Sender** matches as a case-insensitive substring against the sender's name or email; **Messages** and **Total Size** are both "at least" (`>=`) numeric thresholds. |
 | 7.3.5 | The Total Size filter must accept a unit suffix (`B`, `KB`, `MB`, `GB`, case-insensitive); a value with no unit is treated as bytes. |
 | 7.3.6 | Filters combine with AND logic, and apply before sorting. Invalid or empty filter input must be treated as "no filter for this column," never as an error. |

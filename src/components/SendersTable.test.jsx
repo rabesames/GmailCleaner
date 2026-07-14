@@ -103,6 +103,21 @@ describe('rendering', () => {
     renderTable({ senders: [sender({ totalSize: bytes })] });
     expect(screen.getByText(expected)).toBeInTheDocument();
   });
+
+  it('shows the latest message date, formatted', () => {
+    renderTable({ senders: [sender({ latestMessage: { date: 'Wed, 1 Jan 2025 00:00:00 +0000', subject: 'Hi', snippet: '' } })] });
+    expect(screen.getByText(new Date('Wed, 1 Jan 2025 00:00:00 +0000').toLocaleDateString())).toBeInTheDocument();
+  });
+
+  it('shows a dash for the latest message date when no message has a parseable date', () => {
+    renderTable({ senders: [sender({ latestMessage: { date: null, subject: 'Hi', snippet: '' } })] });
+    expect(screen.getByText('—')).toBeInTheDocument();
+  });
+
+  it('shows a dash for the latest message date when there is no latest message at all', () => {
+    renderTable({ senders: [sender({ latestMessage: null })] });
+    expect(screen.getByText('—')).toBeInTheDocument();
+  });
 });
 
 describe('sorting', () => {
@@ -171,6 +186,17 @@ describe('sorting', () => {
     // on that same header cycles directly to unsorted, not ascending.
     await userEvent.click(screen.getByText('Total Size').closest('th'));
     expect(rowEmails()).toEqual(['Bravo <b@example.com>', 'Alpha <a@example.com>', 'Charlie <c@example.com>']);
+  });
+
+  it('sorts by Latest Message', async () => {
+    const byDate = [
+      sender({ email: 'mid@example.com', name: 'Mid', latestTimestamp: Date.parse('2026-02-01') }),
+      sender({ email: 'newest@example.com', name: 'Newest', latestTimestamp: Date.parse('2026-03-01') }),
+      sender({ email: 'oldest@example.com', name: 'Oldest', latestTimestamp: Date.parse('2026-01-01') }),
+    ];
+    renderTable({ senders: byDate });
+    await userEvent.click(screen.getByText('Latest Message').closest('th')); // ascending
+    expect(rowEmails()).toEqual(['Oldest <oldest@example.com>', 'Mid <mid@example.com>', 'Newest <newest@example.com>']);
   });
 });
 

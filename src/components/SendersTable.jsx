@@ -3,7 +3,7 @@ import Pagination from './Pagination.jsx';
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50, 100];
 
-const SORT_COLUMNS = ['name', 'messageCount', 'totalSize'];
+const SORT_COLUMNS = ['name', 'messageCount', 'totalSize', 'latestTimestamp'];
 const DEFAULT_SORT_STATE = { column: 'totalSize', direction: 'desc' };
 const DEFAULT_FILTERS = { sender: '', messages: '', totalSize: '' };
 
@@ -46,6 +46,15 @@ function formatSize(bytes) {
 // below), so it never needs to handle a missing date itself.
 function formatDate(iso) {
   return new Date(iso).toLocaleString();
+}
+
+// For the Latest Message column -- unlike the title-building code below,
+// this renders unconditionally, so it has to cover the "no parseable date
+// on any message from this sender" case itself (same senders that sort to
+// the bottom of a latestTimestamp === -Infinity sort).
+function formatLatestMessageDate(sender) {
+  const date = sender.latestMessage && sender.latestMessage.date;
+  return date ? new Date(date).toLocaleDateString() : '—';
 }
 
 function openGmailSearch(email) {
@@ -222,6 +231,9 @@ export default function SendersTable({
             <th data-sort="totalSize" onClick={() => setSortState((prev) => cycleSortState(prev, 'totalSize'))}>
               Total Size<span className="sort-indicator">{sortIndicator(sortState, 'totalSize')}</span>
             </th>
+            <th data-sort="latestTimestamp" onClick={() => setSortState((prev) => cycleSortState(prev, 'latestTimestamp'))}>
+              Latest Message<span className="sort-indicator">{sortIndicator(sortState, 'latestTimestamp')}</span>
+            </th>
             {showReasonColumn && <th>Why</th>}
             <th></th>
           </tr>
@@ -264,6 +276,7 @@ export default function SendersTable({
                 }}
               />
             </th>
+            <th></th>
             {showReasonColumn && <th></th>}
             <th></th>
           </tr>
@@ -352,6 +365,7 @@ function SenderRow({ sender, onTrash, onIgnore, selected, onToggleSelect, showRe
       </td>
       <td>{sender.messageCount}</td>
       <td>{formatSize(sender.totalSize)}</td>
+      <td>{formatLatestMessageDate(sender)}</td>
       {showReasonColumn && (
         <td className="reason-col">
           {(sender.reasons || []).map((reason) => (
