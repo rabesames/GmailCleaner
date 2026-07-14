@@ -22,6 +22,7 @@ function rowEmails() {
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  localStorage.clear();
   vi.spyOn(window, 'confirm').mockReturnValue(true);
   vi.spyOn(window, 'alert').mockImplementation(() => {});
   vi.spyOn(window, 'open').mockImplementation(() => {});
@@ -488,5 +489,52 @@ describe('pagination', () => {
 
     await userEvent.click(screen.getByRole('checkbox', { name: 'Select all senders on this page' }));
     expect(screen.getByRole('button', { name: 'Move selected senders to Trash' })).toHaveTextContent('Move to Trash (25)');
+  });
+});
+
+describe('sort/filter persistence', () => {
+  const senders = [
+    sender({ email: 'b@example.com', name: 'Bravo', messageCount: 5, totalSize: 200 }),
+    sender({ email: 'a@example.com', name: 'Alpha', messageCount: 10, totalSize: 300 }),
+    sender({ email: 'c@example.com', name: 'Charlie', messageCount: 1, totalSize: 100 }),
+  ];
+
+  it('restores a previously remembered sort order on mount', () => {
+    localStorage.setItem('gmailCleaner.sendersSort', JSON.stringify({ column: 'name', direction: 'asc' }));
+    render(<SendersTable senders={senders} onTrash={vi.fn()} onIgnore={vi.fn()} />);
+    expect(rowEmails()).toEqual(['Alpha <a@example.com>', 'Bravo <b@example.com>', 'Charlie <c@example.com>']);
+  });
+
+  it('restores previously remembered filters on mount', () => {
+    localStorage.setItem('gmailCleaner.sendersFilters', JSON.stringify({ sender: 'bravo', messages: '', totalSize: '' }));
+    render(<SendersTable senders={senders} onTrash={vi.fn()} onIgnore={vi.fn()} />);
+    expect(rowEmails()).toEqual(['Bravo <b@example.com>']);
+    expect(screen.getByPlaceholderText('Contains...')).toHaveValue('bravo');
+  });
+
+  it('persists sort changes as they happen', async () => {
+    render(<SendersTable senders={senders} onTrash={vi.fn()} onIgnore={vi.fn()} />);
+    await userEvent.click(screen.getByText('Messages').closest('th'));
+    expect(JSON.parse(localStorage.getItem('gmailCleaner.sendersSort'))).toEqual({ column: 'messageCount', direction: 'asc' });
+  });
+
+  it('persists filter changes as they happen', async () => {
+    render(<SendersTable senders={senders} onTrash={vi.fn()} onIgnore={vi.fn()} />);
+    await userEvent.type(screen.getByPlaceholderText('>= count'), '5');
+    expect(JSON.parse(localStorage.getItem('gmailCleaner.sendersFilters'))).toEqual({ sender: '', messages: '5', totalSize: '' });
+  });
+
+  it('falls back to the default sort/filters when stored values are malformed', () => {
+    localStorage.setItem('gmailCleaner.sendersSort', 'not json');
+    localStorage.setItem('gmailCleaner.sendersFilters', JSON.stringify({ sender: 'ok' })); // missing keys
+    render(<SendersTable senders={senders} onTrash={vi.fn()} onIgnore={vi.fn()} />);
+    // Default sort (total size descending) plus no filters applied.
+    expect(rowEmails()).toEqual(['Alpha <a@example.com>', 'Bravo <b@example.com>', 'Charlie <c@example.com>']);
+  });
+
+  it('ignores a stored sort column that no longer exists', () => {
+    localStorage.setItem('gmailCleaner.sendersSort', JSON.stringify({ column: 'nonexistentColumn', direction: 'asc' }));
+    render(<SendersTable senders={senders} onTrash={vi.fn()} onIgnore={vi.fn()} />);
+    expect(rowEmails()).toEqual(['Alpha <a@example.com>', 'Bravo <b@example.com>', 'Charlie <c@example.com>']);
   });
 });

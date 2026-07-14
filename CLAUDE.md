@@ -262,6 +262,23 @@ than only checking the final rendered count, or an active filter would
 incorrectly show the "click Sync Now" message instead of "no senders
 match."
 
+### Sort/filter persistence
+
+`sortState` and `filters` are both remembered in `localStorage`
+(`gmailCleaner.sendersSort` / `gmailCleaner.sendersFilters`) — same
+"public, non-secret, convenience only" treatment as the OAuth Client ID
+in `auth.js` (see Credential handling), just scoped to UI preference
+instead of a credential. `loadStoredSort`/`loadStoredFilters` are used as
+the lazy `useState` initializer for each, and a `useEffect` per piece of
+state writes it back out on every change. Both loaders are deliberately
+permissive about bad input (missing key, malformed JSON, a sort column
+that no longer exists) — `try/catch` around the `JSON.parse` plus a
+shape check on the parsed value, falling back to the same defaults used
+before persistence existed, rather than surfacing a parse error or
+crashing the table. Page/pageSize are *not* persisted alongside them
+(see Pagination below) — which page you were on stops being meaningful
+as soon as the sender list changes shape after a fresh sync.
+
 ### Pagination
 
 `SendersTable.jsx` and `IgnoredSendersList.jsx` each keep their own local

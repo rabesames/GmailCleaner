@@ -3,6 +3,40 @@ import Pagination from './Pagination.jsx';
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50, 100];
 
+// Sort/filter choices are remembered in localStorage (same "public,
+// non-secret, convenience only" treatment as the OAuth Client ID in
+// auth.js) so returning to the app doesn't lose how you last narrowed the
+// list down. Page/pageSize deliberately aren't included here -- which page
+// you were on isn't meaningful once the underlying sender list has changed
+// after a fresh sync.
+const SORT_STORAGE_KEY = 'gmailCleaner.sendersSort';
+const FILTERS_STORAGE_KEY = 'gmailCleaner.sendersFilters';
+const SORT_COLUMNS = ['name', 'messageCount', 'totalSize'];
+const DEFAULT_SORT_STATE = { column: 'totalSize', direction: 'desc' };
+const DEFAULT_FILTERS = { sender: '', messages: '', totalSize: '' };
+
+function loadStoredSort() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SORT_STORAGE_KEY));
+    const validColumn = parsed.column === null || SORT_COLUMNS.includes(parsed.column);
+    const validDirection = parsed.direction === 'asc' || parsed.direction === 'desc';
+    if (validColumn && (parsed.column === null || validDirection)) return parsed;
+  } catch {
+    // Malformed/missing storage -- fall through to the default below.
+  }
+  return DEFAULT_SORT_STATE;
+}
+
+function loadStoredFilters() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(FILTERS_STORAGE_KEY));
+    if (Object.keys(DEFAULT_FILTERS).every((key) => typeof parsed[key] === 'string')) return parsed;
+  } catch {
+    // Malformed/missing storage -- fall through to the default below.
+  }
+  return DEFAULT_FILTERS;
+}
+
 function formatSize(bytes) {
   if (!bytes) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];
@@ -67,12 +101,20 @@ function sortIndicator(sortState, column) {
 }
 
 export default function SendersTable({ senders, onTrash, onIgnore, onTrashSelected }) {
-  const [sortState, setSortState] = useState({ column: 'totalSize', direction: 'desc' });
-  const [filters, setFilters] = useState({ sender: '', messages: '', totalSize: '' });
+  const [sortState, setSortState] = useState(loadStoredSort);
+  const [filters, setFilters] = useState(loadStoredFilters);
   const [selected, setSelected] = useState(() => new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
+
+  useEffect(() => {
+    localStorage.setItem(SORT_STORAGE_KEY, JSON.stringify(sortState));
+  }, [sortState]);
+
+  useEffect(() => {
+    localStorage.setItem(FILTERS_STORAGE_KEY, JSON.stringify(filters));
+  }, [filters]);
 
   // A sender that drops out of `senders` (trashed, ignored) should also drop
   // out of the selection -- otherwise a stale email could linger in
