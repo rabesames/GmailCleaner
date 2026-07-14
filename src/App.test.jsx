@@ -193,6 +193,22 @@ describe('sender actions wired through to the lib layer', () => {
     expect(markGone).toHaveBeenCalledWith(['1', '2', '3']);
   });
 
+  it('trashes multiple selected senders: merges their ids into one trashMessages/markGone call', async () => {
+    getTopSenders.mockResolvedValue([
+      sender({ email: 'spammy@example.com', name: 'Spammy', messageCount: 3, ids: ['1', '2', '3'] }),
+      sender({ email: 'other@example.com', name: 'Other', messageCount: 2, ids: ['4', '5'] }),
+    ]);
+    render(<App />);
+    await screen.findByText('Spammy <spammy@example.com>');
+
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Select Spammy' }));
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Select Other' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Move selected senders to Trash' }));
+
+    await waitFor(() => expect(trashMessages).toHaveBeenCalledWith(['1', '2', '3', '4', '5']));
+    expect(markGone).toHaveBeenCalledWith(['1', '2', '3', '4', '5']);
+  });
+
   it('ignores a sender: calls ignoreSender then refreshes senders and the ignore list', async () => {
     getTopSenders.mockResolvedValue([sender({ email: 'spammy@example.com' })]);
     render(<App />);

@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 
 function formatSize(bytes) {
   if (!bytes) return '0 B';
@@ -63,9 +63,22 @@ function sortIndicator(sortState, column) {
   return sortState.direction === 'asc' ? ' ▲' : ' ▼';
 }
 
-export default function SendersTable({ senders, onTrash, onIgnore }) {
+export default function SendersTable({ senders, onTrash, onIgnore, onTrashSelected }) {
   const [sortState, setSortState] = useState({ column: 'totalSize', direction: 'desc' });
   const [filters, setFilters] = useState({ sender: '', messages: '', totalSize: '' });
+  const [selected, setSelected] = useState(() => new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+
+  // A sender that drops out of `senders` (trashed, ignored) should also drop
+  // out of the selection -- otherwise a stale email could linger in
+  // `selected` indefinitely with nothing in the list to ever deselect it.
+  useEffect(() => {
+    setSelected((prev) => {
+      const emails = new Set(senders.map((sender) => sender.email));
+      const next = new Set([...prev].filter((email) => emails.has(email)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [senders]);
 
   const filteredSenders = useMemo(() => {
     const senderQuery = filters.sender.trim().toLowerCase();
@@ -103,11 +116,76 @@ export default function SendersTable({ senders, onTrash, onIgnore }) {
     emptyMessage = senders.length > 0 ? 'No senders match the current filters.' : 'Sign in and click "Sync Now" to fetch your inbox.';
   }
 
+  const selectedSenders = useMemo(() => senders.filter((sender) => selected.has(sender.email)), [senders, selected]);
+
+  const allVisibleSelected = sortedSenders.length > 0 && sortedSenders.every((sender) => selected.has(sender.email));
+  const someVisibleSelected = !allVisibleSelected && sortedSenders.some((sender) => selected.has(sender.email));
+  const selectAllRef = useRef(null);
+  useEffect(() => {
+    selectAllRef.current.indeterminate = someVisibleSelected;
+  }, [someVisibleSelected]);
+
+  const toggleSelected = (email) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(email)) next.delete(email);
+      else next.add(email);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (allVisibleSelected) {
+        sortedSenders.forEach((sender) => next.delete(sender.email));
+      } else {
+        sortedSenders.forEach((sender) => next.add(sender.email));
+      }
+      return next;
+    });
+  };
+
+  const handleTrashSelected = async () => {
+    const totalMessages = selectedSenders.reduce((sum, sender) => sum + sender.messageCount, 0);
+    const label = selectedSenders.length === 1 ? '1 sender' : `${selectedSenders.length} senders`;
+    if (!confirm(`Move all ${totalMessages} email(s) from ${label} to Trash?`)) return;
+    setBulkBusy(true);
+    try {
+      await onTrashSelected(selectedSenders);
+      // On success every trashed sender drops out of `senders`, which the
+      // effect above already prunes from `selected` -- nothing more to do.
+    } catch (err) {
+      alert(err.message);
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
   return (
     <>
+      <div className="table-toolbar">
+        <button
+          className="danger"
+          aria-label="Move selected senders to Trash"
+          disabled={selectedSenders.length === 0 || bulkBusy}
+          onClick={handleTrashSelected}
+        >
+          {bulkBusy ? 'Working...' : `Move to Trash${selectedSenders.length ? ` (${selectedSenders.length})` : ''}`}
+        </button>
+      </div>
       <table id="sendersTable">
         <thead>
           <tr>
+            <th className="select-col">
+              <input
+                type="checkbox"
+                ref={selectAllRef}
+                checked={allVisibleSelected}
+                onChange={toggleSelectAll}
+                aria-label="Select all senders"
+              />
+            </th>
             <th data-sort="name" onClick={() => setSortState((prev) => cycleSortState(prev, 'name'))}>
               Sender<span className="sort-indicator">{sortIndicator(sortState, 'name')}</span>
             </th>
@@ -120,6 +198,7 @@ export default function SendersTable({ senders, onTrash, onIgnore }) {
             <th></th>
           </tr>
           <tr className="filters">
+            <th></th>
             <th>
               <input
                 type="text"
@@ -153,7 +232,14 @@ export default function SendersTable({ senders, onTrash, onIgnore }) {
         </thead>
         <tbody>
           {sortedSenders.map((sender) => (
-            <SenderRow key={sender.email} sender={sender} onTrash={onTrash} onIgnore={onIgnore} />
+            <SenderRow
+              key={sender.email}
+              sender={sender}
+              onTrash={onTrash}
+              onIgnore={onIgnore}
+              selected={selected.has(sender.email)}
+              onToggleSelect={toggleSelected}
+            />
           ))}
         </tbody>
       </table>
@@ -162,7 +248,7 @@ export default function SendersTable({ senders, onTrash, onIgnore }) {
   );
 }
 
-function SenderRow({ sender, onTrash, onIgnore }) {
+function SenderRow({ sender, onTrash, onIgnore, selected, onToggleSelect }) {
   const [busy, setBusy] = useState(false);
 
   const title = sender.latestMessage
@@ -202,6 +288,14 @@ function SenderRow({ sender, onTrash, onIgnore }) {
 
   return (
     <tr>
+      <td className="select-col">
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={() => onToggleSelect(sender.email)}
+          aria-label={`Select ${sender.name || sender.email}`}
+        />
+      </td>
       <td className="sender-link" title={title} onClick={() => openGmailSearch(sender.email)}>
         {sender.name ? `${sender.name} <${sender.email}>` : sender.email}
       </td>

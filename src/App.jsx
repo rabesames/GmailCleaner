@@ -103,6 +103,13 @@ export default function App() {
     await refreshSenders();
   };
 
+  const handleTrashSelected = async (selectedSenders) => {
+    const ids = selectedSenders.flatMap((sender) => sender.ids);
+    await trashMessages(ids);
+    await markGone(ids);
+    await refreshSenders();
+  };
+
   const handleIgnore = async (sender) => {
     await ignoreSender(sender.email);
     await refreshAll();
@@ -142,7 +149,7 @@ export default function App() {
         </p>
       </header>
       <main>
-        <SendersTable senders={senders} onTrash={handleTrash} onIgnore={handleIgnore} />
+        <SendersTable senders={senders} onTrash={handleTrash} onIgnore={handleIgnore} onTrashSelected={handleTrashSelected} />
         <IgnoredSendersList emails={ignoredSenders} onUnignore={handleUnignore} />
       </main>
     </>
