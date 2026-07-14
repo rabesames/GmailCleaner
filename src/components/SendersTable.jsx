@@ -178,13 +178,15 @@ export default function SendersTable({ senders, onTrash, onIgnore, onTrashSelect
         <thead>
           <tr>
             <th className="select-col">
-              <input
-                type="checkbox"
-                ref={selectAllRef}
-                checked={allVisibleSelected}
-                onChange={toggleSelectAll}
-                aria-label="Select all senders"
-              />
+              <label className="checkbox-target">
+                <input
+                  type="checkbox"
+                  ref={selectAllRef}
+                  checked={allVisibleSelected}
+                  onChange={toggleSelectAll}
+                  aria-label="Select all senders"
+                />
+              </label>
             </th>
             <th data-sort="name" onClick={() => setSortState((prev) => cycleSortState(prev, 'name'))}>
               Sender<span className="sort-indicator">{sortIndicator(sortState, 'name')}</span>
@@ -289,12 +291,14 @@ function SenderRow({ sender, onTrash, onIgnore, selected, onToggleSelect }) {
   return (
     <tr>
       <td className="select-col">
-        <input
-          type="checkbox"
-          checked={selected}
-          onChange={() => onToggleSelect(sender.email)}
-          aria-label={`Select ${sender.name || sender.email}`}
-        />
+        <label className="checkbox-target">
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={() => onToggleSelect(sender.email)}
+            aria-label={`Select ${sender.name || sender.email}`}
+          />
+        </label>
       </td>
       <td className="sender-link" title={title} onClick={() => openGmailSearch(sender.email)}>
         {sender.name ? `${sender.name} <${sender.email}>` : sender.email}

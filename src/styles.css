@@ -130,16 +130,36 @@ main {
 }
 
 .table-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
   display: flex;
   justify-content: flex-end;
   margin-bottom: 0.5rem;
+  padding: 0.5rem 0;
+  background: #f5f6f8;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.08);
 }
 
 th.select-col,
 td.select-col {
-  width: 2rem;
-  padding-left: 1rem;
-  padding-right: 0;
+  width: 2.75rem;
+  padding: 0;
+}
+
+.checkbox-target {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  cursor: pointer;
+}
+
+.checkbox-target input[type='checkbox'] {
+  width: 1.15rem;
+  height: 1.15rem;
+  cursor: pointer;
 }
 
 table {
