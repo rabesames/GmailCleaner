@@ -153,6 +153,7 @@ export default function SendersSection({
             onToggleSelectAll={toggleSelectAll}
             storageKeyPrefix="gmailCleaner.cleanupSuggestions"
             noDataMessage="No cleanup suggestions right now."
+            showReasonColumn
           />
         </>
       )}

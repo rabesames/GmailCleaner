@@ -325,6 +325,11 @@ const MS_PER_YEAR = 365.25 * 24 * 60 * 60 * 1000;
 // getTopSenders() -- same aggregation + ignored-exclusion, extra filter --
 // so a sender with zero active messages (fully trashed, nothing new since)
 // correctly drops out here too, even if still in trashedSenders.
+// Each returned entry carries `reasons` (a subset of ['trashedBefore',
+// 'staleNoContact']) so the UI can explain *why* that sender was
+// suggested -- a sender can match both at once (e.g. trashed before, and
+// also currently stale/uncontacted again), so this is always an array,
+// never a single value.
 export async function getCleanupSuggestions(thresholdYears) {
   const [messages, ignoredEmails, contactedEmails, trashedEmails] = await Promise.all([
     getAllMessages(),
@@ -337,7 +342,12 @@ export async function getCleanupSuggestions(thresholdYears) {
   const trashedSet = new Set(trashedEmails);
   const cutoff = Date.now() - thresholdYears * MS_PER_YEAR;
 
-  return [...bySender.values()]
-    .filter((entry) => (!contactedSet.has(entry.email) && entry.latestTimestamp < cutoff) || trashedSet.has(entry.email))
-    .sort((a, b) => b.totalSize - a.totalSize);
+  const suggestions = [];
+  for (const entry of bySender.values()) {
+    const reasons = [];
+    if (!contactedSet.has(entry.email) && entry.latestTimestamp < cutoff) reasons.push('staleNoContact');
+    if (trashedSet.has(entry.email)) reasons.push('trashedBefore');
+    if (reasons.length) suggestions.push({ ...entry, reasons });
+  }
+  return suggestions.sort((a, b) => b.totalSize - a.totalSize);
 }

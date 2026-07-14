@@ -141,6 +141,7 @@ requirements below (notably OAuth setup and Gmail API quota limits).
 | 7.6.6 | The user can select multiple senders via a checkbox per row and a "select all" checkbox scoped to the currently visible page. |
 | 7.6.7 | A single "Move to Trash" action, positioned above both tabs, moves every selected sender's mail to Trash in one confirmation step, after showing the total message and sender count. It is disabled whenever no sender is selected. |
 | 7.6.8 | A sender selected while viewing one tab remains selected (and counted toward 7.6.7) if the user switches to the other tab and the same sender also appears there. |
+| 7.6.9 | Cleanup Suggestions shows an additional "Why" column with an icon per matched criterion (never-emailed-and-stale, previously-trashed — a sender can show both at once), each with a tooltip explaining that specific reason in plain language. |
 
 ## 8. Data Model
 

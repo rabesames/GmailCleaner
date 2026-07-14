@@ -258,6 +258,35 @@ describe('hover preview', () => {
   });
 });
 
+describe('reason column', () => {
+  it('does not render a Why column when showReasonColumn is not set', () => {
+    renderTable({ senders: [sender({ reasons: ['trashedBefore'] })] });
+    expect(screen.queryByText('Why')).not.toBeInTheDocument();
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
+  });
+
+  it('renders an icon with a tooltip for each reason when showReasonColumn is set', () => {
+    renderTable({
+      senders: [sender({ reasons: ['staleNoContact', 'trashedBefore'] })],
+      showReasonColumn: true,
+    });
+    expect(screen.getByText('Why')).toBeInTheDocument();
+    const icons = screen.getAllByRole('img');
+    expect(icons).toHaveLength(2);
+    expect(icons[0]).toHaveAttribute(
+      'title',
+      "You've never emailed or replied to this sender, and their most recent message is older than the threshold."
+    );
+    expect(icons[1]).toHaveAttribute('title', "You've moved mail from this sender to Trash here before.");
+  });
+
+  it('renders no icons for a sender with no reasons field, even with the column shown', () => {
+    renderTable({ senders: [sender()], showReasonColumn: true }); // default sender() has no `reasons` field at all
+    expect(screen.getByText('Why')).toBeInTheDocument();
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
+  });
+});
+
 describe('click-to-search', () => {
   it('opens a Gmail search for the sender in a new tab', async () => {
     renderTable({ senders: [sender({ email: 'a@example.com' })] });

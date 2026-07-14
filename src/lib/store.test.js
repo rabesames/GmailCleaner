@@ -357,6 +357,7 @@ describe('getCleanupSuggestions', () => {
     await store.upsertMessages([{ id: '1', from: 'old@example.com', sizeEstimate: 10, date: OLD_DATE }]);
     const suggestions = await store.getCleanupSuggestions(2);
     expect(suggestions.map((s) => s.email)).toEqual(['old@example.com']);
+    expect(suggestions[0].reasons).toEqual(['staleNoContact']);
   });
 
   it('excludes a sender the user has contacted, even if old', async () => {
@@ -376,6 +377,16 @@ describe('getCleanupSuggestions', () => {
     await store.recordTrashedSenders(['repeat@example.com']);
     const suggestions = await store.getCleanupSuggestions(2);
     expect(suggestions.map((s) => s.email)).toEqual(['repeat@example.com']);
+    expect(suggestions[0].reasons).toEqual(['trashedBefore']);
+  });
+
+  it('carries both reasons when a sender is both previously-trashed and currently stale/uncontacted', async () => {
+    await store.upsertMessages([{ id: '1', from: 'both@example.com', sizeEstimate: 10, date: OLD_DATE }]);
+    await store.recordTrashedSenders(['both@example.com']);
+    const suggestions = await store.getCleanupSuggestions(2);
+    expect(suggestions.map((s) => s.email)).toEqual(['both@example.com']);
+    expect(suggestions[0].reasons).toEqual(expect.arrayContaining(['staleNoContact', 'trashedBefore']));
+    expect(suggestions[0].reasons).toHaveLength(2);
   });
 
   it('excludes ignored senders, same as getTopSenders', async () => {

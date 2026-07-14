@@ -92,6 +92,20 @@ function sortIndicator(sortState, column) {
   return sortState.direction === 'asc' ? ' ▲' : ' ▼';
 }
 
+// Explains *why* a Cleanup Suggestions row is suggested (see store.js's
+// getCleanupSuggestions, which attaches `reasons` to each sender). A sender
+// can carry both reasons at once (e.g. trashed before, and currently
+// stale/uncontacted again) -- SenderRow renders one icon per reason present,
+// each with its own native-tooltip explanation (title attribute), same
+// pattern as the hover-preview elsewhere in this file.
+const REASON_META = {
+  trashedBefore: { icon: '🗑️', label: "You've moved mail from this sender to Trash here before." },
+  staleNoContact: {
+    icon: '🕸️',
+    label: "You've never emailed or replied to this sender, and their most recent message is older than the threshold.",
+  },
+};
+
 // Selection lives above this component (see SendersSection.jsx) since two
 // instances of this table (All Senders / Cleanup Suggestions) share one
 // selection Set and one "Move to Trash" toolbar. Sort/filter/pagination stay
@@ -107,6 +121,7 @@ export default function SendersTable({
   onToggleSelectAll,
   storageKeyPrefix,
   noDataMessage,
+  showReasonColumn,
 }) {
   const [sortState, setSortState] = useState(() => loadStoredSort(storageKeyPrefix));
   const [filters, setFilters] = useState(() => loadStoredFilters(storageKeyPrefix));
@@ -207,6 +222,7 @@ export default function SendersTable({
             <th data-sort="totalSize" onClick={() => setSortState((prev) => cycleSortState(prev, 'totalSize'))}>
               Total Size<span className="sort-indicator">{sortIndicator(sortState, 'totalSize')}</span>
             </th>
+            {showReasonColumn && <th>Why</th>}
             <th></th>
           </tr>
           <tr className="filters">
@@ -248,6 +264,7 @@ export default function SendersTable({
                 }}
               />
             </th>
+            {showReasonColumn && <th></th>}
             <th></th>
           </tr>
         </thead>
@@ -260,6 +277,7 @@ export default function SendersTable({
               onIgnore={onIgnore}
               selected={selected.has(sender.email)}
               onToggleSelect={onToggleSelect}
+              showReasonColumn={showReasonColumn}
             />
           ))}
         </tbody>
@@ -279,7 +297,7 @@ export default function SendersTable({
   );
 }
 
-function SenderRow({ sender, onTrash, onIgnore, selected, onToggleSelect }) {
+function SenderRow({ sender, onTrash, onIgnore, selected, onToggleSelect, showReasonColumn }) {
   const [busy, setBusy] = useState(false);
 
   const title = sender.latestMessage
@@ -334,6 +352,15 @@ function SenderRow({ sender, onTrash, onIgnore, selected, onToggleSelect }) {
       </td>
       <td>{sender.messageCount}</td>
       <td>{formatSize(sender.totalSize)}</td>
+      {showReasonColumn && (
+        <td className="reason-col">
+          {(sender.reasons || []).map((reason) => (
+            <span key={reason} className="reason-icon" role="img" aria-label={REASON_META[reason].label} title={REASON_META[reason].label}>
+              {REASON_META[reason].icon}
+            </span>
+          ))}
+        </td>
+      )}
       <td>
         <div className="actions">
           <button className="secondary" disabled={busy} onClick={handleIgnore}>

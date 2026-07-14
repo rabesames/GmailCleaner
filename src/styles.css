@@ -206,6 +206,19 @@ td.select-col {
   cursor: pointer;
 }
 
+td.reason-col {
+  white-space: nowrap;
+}
+
+.reason-icon {
+  font-size: 1.1rem;
+  cursor: default;
+}
+
+.reason-icon + .reason-icon {
+  margin-left: 0.35rem;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;

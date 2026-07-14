@@ -470,6 +470,21 @@ invisible everywhere" semantics) — this falls out for free since both
 tabs' data comes from the same `aggregateBySender` exclusion in
 `store.js`.
 
+**Why column.** Each suggested sender carries a `reasons` array (a subset
+of `['staleNoContact', 'trashedBefore']`, attached by
+`getCleanupSuggestions` — see `store.js` above) so the UI can explain the
+suggestion rather than just asserting it; a sender can carry both at
+once (trashed before, and currently stale/uncontacted again). This is
+the one place `SendersTable.jsx` renders content that doesn't exist on
+plain `getTopSenders()` rows, which is why it's gated behind a
+`showReasonColumn` prop (only passed `true` for the Cleanup Suggestions
+instance in `SendersSection.jsx`) rather than always rendered — the All
+Senders tab's sender objects never have a `reasons` field, so the column
+would otherwise always be empty there. `SenderRow` maps `reasons` to one
+`REASON_META[reason]` icon+tooltip each (native `title` attribute, same
+pattern as the hover-preview elsewhere in this file) — `🗑️` for
+`trashedBefore`, `🕸️` for `staleNoContact`.
+
 ### Tabs and shared selection
 
 `SendersSection.jsx` renders a `role="tablist"` switcher between two
