@@ -304,7 +304,7 @@ describe('bulk selection', () => {
 
   it('selects and deselects every visible sender via the header checkbox', async () => {
     render(<SendersTable senders={senders} onTrash={vi.fn()} onIgnore={vi.fn()} onTrashSelected={vi.fn()} />);
-    const selectAll = screen.getByRole('checkbox', { name: 'Select all senders' });
+    const selectAll = screen.getByRole('checkbox', { name: 'Select all senders on this page' });
 
     await userEvent.click(selectAll);
     expect(screen.getByRole('checkbox', { name: 'Select Alice' })).toBeChecked();
@@ -319,7 +319,7 @@ describe('bulk selection', () => {
 
   it('marks the header checkbox indeterminate when only some senders are selected', async () => {
     render(<SendersTable senders={senders} onTrash={vi.fn()} onIgnore={vi.fn()} onTrashSelected={vi.fn()} />);
-    const selectAll = screen.getByRole('checkbox', { name: 'Select all senders' });
+    const selectAll = screen.getByRole('checkbox', { name: 'Select all senders on this page' });
 
     await userEvent.click(screen.getByRole('checkbox', { name: 'Select Alice' }));
     expect(selectAll.indeterminate).toBe(true);
@@ -416,5 +416,77 @@ describe('Ignore', () => {
     await waitFor(() => expect(window.alert).toHaveBeenCalledWith('ignore failed'));
     expect(screen.getByRole('button', { name: 'Ignore' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Move to Trash' })).toBeEnabled();
+  });
+});
+
+describe('pagination', () => {
+  function manySenders(count) {
+    return Array.from({ length: count }, (_, i) =>
+      sender({ email: `s${String(i).padStart(2, '0')}@example.com`, name: `Sender ${String(i).padStart(2, '0')}`, totalSize: count - i })
+    );
+  }
+
+  it('shows only the first page by default and reports the right counts', () => {
+    render(<SendersTable senders={manySenders(30)} onTrash={vi.fn()} onIgnore={vi.fn()} />);
+    expect(rowEmails()).toHaveLength(25); // default page size
+    expect(screen.getByText('Showing 1-25 of 30 senders')).toBeInTheDocument();
+    expect(screen.getByText('Page 1 of 2')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled();
+  });
+
+  it('navigates to the next/previous page', async () => {
+    render(<SendersTable senders={manySenders(30)} onTrash={vi.fn()} onIgnore={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Next' }));
+    expect(rowEmails()).toHaveLength(5);
+    expect(screen.getByText('Showing 26-30 of 30 senders')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Previous' }));
+    expect(rowEmails()).toHaveLength(25);
+    expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled();
+  });
+
+  it('changing the page size re-pages the list and resets to page 1', async () => {
+    render(<SendersTable senders={manySenders(30)} onTrash={vi.fn()} onIgnore={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Next' })); // go to page 2 of the default size
+    await userEvent.selectOptions(screen.getByRole('combobox'), '10');
+
+    expect(rowEmails()).toHaveLength(10);
+    expect(screen.getByText('Showing 1-10 of 30 senders')).toBeInTheDocument();
+    expect(screen.getByText('Page 1 of 3')).toBeInTheDocument();
+  });
+
+  it('resets to page 1 when a filter narrows the result set', async () => {
+    render(<SendersTable senders={manySenders(30)} onTrash={vi.fn()} onIgnore={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Next' }));
+    expect(screen.getByText('Page 2 of 2')).toBeInTheDocument();
+
+    await userEvent.type(screen.getByPlaceholderText('Contains...'), 'Sender 0');
+    expect(screen.getByText(/Page 1 of/)).toBeInTheDocument();
+    expect(rowEmails().every((text) => text.includes('Sender 0'))).toBe(true);
+  });
+
+  it('clamps to the last page when the result set shrinks out from under the current page', async () => {
+    const { rerender } = render(<SendersTable senders={manySenders(30)} onTrash={vi.fn()} onIgnore={vi.fn()} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Next' })); // now on page 2 of 2
+    rerender(<SendersTable senders={manySenders(3)} onTrash={vi.fn()} onIgnore={vi.fn()} />);
+    expect(screen.getByText('Page 1 of 1')).toBeInTheDocument();
+    expect(rowEmails()).toHaveLength(3);
+  });
+
+  it('does not render pagination controls when there are no senders', () => {
+    render(<SendersTable senders={[]} onTrash={vi.fn()} onIgnore={vi.fn()} />);
+    expect(screen.queryByText(/Page \d+ of/)).not.toBeInTheDocument();
+  });
+
+  it('select-all only affects the current page, not senders on other pages', async () => {
+    render(<SendersTable senders={manySenders(30)} onTrash={vi.fn()} onIgnore={vi.fn()} onTrashSelected={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Select all senders on this page' }));
+    expect(screen.getByRole('button', { name: 'Move selected senders to Trash' })).toHaveTextContent('Move to Trash (25)');
   });
 });

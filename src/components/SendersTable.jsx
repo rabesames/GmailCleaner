@@ -1,4 +1,7 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
+import Pagination from './Pagination.jsx';
+
+const PAGE_SIZE_OPTIONS = [10, 25, 50, 100];
 
 function formatSize(bytes) {
   if (!bytes) return '0 B';
@@ -68,6 +71,8 @@ export default function SendersTable({ senders, onTrash, onIgnore, onTrashSelect
   const [filters, setFilters] = useState({ sender: '', messages: '', totalSize: '' });
   const [selected, setSelected] = useState(() => new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
 
   // A sender that drops out of `senders` (trashed, ignored) should also drop
   // out of the selection -- otherwise a stale email could linger in
@@ -116,10 +121,28 @@ export default function SendersTable({ senders, onTrash, onIgnore, onTrashSelect
     emptyMessage = senders.length > 0 ? 'No senders match the current filters.' : 'Sign in and click "Sync Now" to fetch your inbox.';
   }
 
+  // `page` can point past the end after filtering/page-size shrinks the
+  // result set (e.g. typing a filter while on page 3) -- `currentPage` is
+  // the clamped value actually used for display/slicing/navigation, so
+  // there's no separate effect needed to keep `page` itself in range.
+  const pageCount = Math.max(1, Math.ceil(sortedSenders.length / pageSize));
+  const currentPage = Math.min(page, pageCount);
+  const pagedSenders = useMemo(
+    () => sortedSenders.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+    [sortedSenders, currentPage, pageSize]
+  );
+
+  const handlePageSizeChange = (newPageSize) => {
+    setPageSize(newPageSize);
+    setPage(1);
+  };
+
   const selectedSenders = useMemo(() => senders.filter((sender) => selected.has(sender.email)), [senders, selected]);
 
-  const allVisibleSelected = sortedSenders.length > 0 && sortedSenders.every((sender) => selected.has(sender.email));
-  const someVisibleSelected = !allVisibleSelected && sortedSenders.some((sender) => selected.has(sender.email));
+  // Select-all applies to the current page only, matching how paginated
+  // tables typically scope "select all" (Gmail's own inbox included).
+  const allVisibleSelected = pagedSenders.length > 0 && pagedSenders.every((sender) => selected.has(sender.email));
+  const someVisibleSelected = !allVisibleSelected && pagedSenders.some((sender) => selected.has(sender.email));
   const selectAllRef = useRef(null);
   useEffect(() => {
     selectAllRef.current.indeterminate = someVisibleSelected;
@@ -138,9 +161,9 @@ export default function SendersTable({ senders, onTrash, onIgnore, onTrashSelect
     setSelected((prev) => {
       const next = new Set(prev);
       if (allVisibleSelected) {
-        sortedSenders.forEach((sender) => next.delete(sender.email));
+        pagedSenders.forEach((sender) => next.delete(sender.email));
       } else {
-        sortedSenders.forEach((sender) => next.add(sender.email));
+        pagedSenders.forEach((sender) => next.add(sender.email));
       }
       return next;
     });
@@ -184,7 +207,7 @@ export default function SendersTable({ senders, onTrash, onIgnore, onTrashSelect
                   ref={selectAllRef}
                   checked={allVisibleSelected}
                   onChange={toggleSelectAll}
-                  aria-label="Select all senders"
+                  aria-label="Select all senders on this page"
                 />
               </label>
             </th>
@@ -207,7 +230,10 @@ export default function SendersTable({ senders, onTrash, onIgnore, onTrashSelect
                 placeholder="Contains..."
                 autoComplete="off"
                 value={filters.sender}
-                onChange={(event) => setFilters((f) => ({ ...f, sender: event.target.value }))}
+                onChange={(event) => {
+                  setFilters((f) => ({ ...f, sender: event.target.value }));
+                  setPage(1);
+                }}
               />
             </th>
             <th>
@@ -217,7 +243,10 @@ export default function SendersTable({ senders, onTrash, onIgnore, onTrashSelect
                 placeholder=">= count"
                 autoComplete="off"
                 value={filters.messages}
-                onChange={(event) => setFilters((f) => ({ ...f, messages: event.target.value }))}
+                onChange={(event) => {
+                  setFilters((f) => ({ ...f, messages: event.target.value }));
+                  setPage(1);
+                }}
               />
             </th>
             <th>
@@ -226,14 +255,17 @@ export default function SendersTable({ senders, onTrash, onIgnore, onTrashSelect
                 placeholder=">= e.g. 500KB or 2MB"
                 autoComplete="off"
                 value={filters.totalSize}
-                onChange={(event) => setFilters((f) => ({ ...f, totalSize: event.target.value }))}
+                onChange={(event) => {
+                  setFilters((f) => ({ ...f, totalSize: event.target.value }));
+                  setPage(1);
+                }}
               />
             </th>
             <th></th>
           </tr>
         </thead>
         <tbody>
-          {sortedSenders.map((sender) => (
+          {pagedSenders.map((sender) => (
             <SenderRow
               key={sender.email}
               sender={sender}
@@ -246,6 +278,16 @@ export default function SendersTable({ senders, onTrash, onIgnore, onTrashSelect
         </tbody>
       </table>
       {emptyMessage && <p className="muted">{emptyMessage}</p>}
+      <Pagination
+        page={currentPage}
+        pageCount={pageCount}
+        pageSize={pageSize}
+        pageSizeOptions={PAGE_SIZE_OPTIONS}
+        totalItems={sortedSenders.length}
+        onPageChange={setPage}
+        onPageSizeChange={handlePageSizeChange}
+        itemLabel="senders"
+      />
     </>
   );
 }

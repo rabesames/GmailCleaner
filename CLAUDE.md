@@ -225,6 +225,10 @@ rationale of each; only the module boundaries changed):
 - **`IgnoredSendersList.jsx`** — same per-item `busy`-flag pattern as
   `SenderRow`, for the same reason (a successful Unignore removes the
   item from the list).
+- **`Pagination.jsx`** — purely presentational (page/pageSize/pageCount
+  in, `onPageChange`/`onPageSizeChange` callbacks out); see Pagination
+  below for why the paging state itself lives in each caller instead of
+  here.
 
 ### Column sorting
 
@@ -257,6 +261,32 @@ prop, pre-filter) against `sortedSenders.length` (post-filter) rather
 than only checking the final rendered count, or an active filter would
 incorrectly show the "click Sync Now" message instead of "no senders
 match."
+
+### Pagination
+
+`SendersTable.jsx` and `IgnoredSendersList.jsx` each keep their own local
+`page`/`pageSize` state (same "state lives where it's used" pattern as
+sort/filter above) and pass the current slice plus callbacks down to the
+shared `Pagination.jsx`, which only renders controls and knows nothing
+about senders or emails. Both callers derive `pageCount` and a *clamped*
+`currentPage = Math.min(page, pageCount)` at render time rather than
+syncing `page` back into range via an effect — `page` can legitimately
+point past the end after a filter narrows the result set or the
+underlying list shrinks (a trash/unignore, or a filter/page-size change),
+and clamping at render is simpler than an effect that has to run before
+the out-of-range page ever paints. Navigation (`onPageChange`) and
+slicing both use `currentPage`, never the raw `page` state, so clicking
+Next while clamped advances from where the user can actually see, not
+from a stale page number. Filter/page-size changes explicitly call
+`setPage(1)` in the same handler that changes the filter/size — that's a
+UX choice (a new filter should start you back at the top of its
+results), not something the clamp alone would do, since clamping only
+kicks in when the current page falls *out* of range, not merely when it
+changes. `SendersTable`'s "select all" checkbox is scoped to
+`pagedSenders` (the current page), not the full filtered/sorted list —
+selecting across pages would silently bulk-trash senders the user never
+saw checked, so it follows the same per-page convention as Gmail's own
+inbox.
 
 ## Gmail API quota (why the sync loop looks the way it does)
 
