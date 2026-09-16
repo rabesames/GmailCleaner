@@ -5,10 +5,23 @@ import { getAccessToken, invalidateStoredToken } from './auth.js';
 // messages.get costs 20, messages.batchModify costs 50 regardless of how
 // many ids are in the batch. That caps messages.get at ~300/minute (~5/sec)
 // per user, which is why metadata fetches below run at modest concurrency
-// with retry-on-429 rather than as fast as the browser allows.
+// rather than as fast as the browser allows -- but concurrency alone only
+// bounds how many requests are ever in flight at once, not units/minute,
+// so hitting the per-user "Total Query Cost" quota during a large sync is
+// still expected by design (see CLAUDE.md's Gmail API quota section),
+// not a bug -- withRetry below is what's relied on to ride it out.
 const GMAIL_API_BASE = 'https://gmail.googleapis.com/gmail/v1/users/me';
 export const METADATA_FETCH_CONCURRENCY = 5;
 const BATCH_MODIFY_CHUNK_SIZE = 1000;
+
+function isQuotaExceededBody(body) {
+  const error = body && body.error;
+  if (!error) return false;
+  if (error.status === 'RESOURCE_EXHAUSTED') return true;
+  const reasons = (error.errors || []).map((e) => e.reason || '');
+  if (reasons.some((reason) => /rateLimitExceeded|quotaExceeded/i.test(reason))) return true;
+  return /quota exceeded/i.test(error.message || '');
+}
 
 async function gmailFetch(path, options = {}, _retriedAuth = false) {
   const token = await getAccessToken();
@@ -34,7 +47,18 @@ async function gmailFetch(path, options = {}, _retriedAuth = false) {
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error((body.error && body.error.message) || `Gmail API error (${res.status})`);
+    const message = (body.error && body.error.message) || `Gmail API error (${res.status})`;
+    const err = new Error(message);
+    // The per-user "Total Query Cost" quota this app is tuned against (see
+    // CLAUDE.md's Gmail API quota section) isn't always reported as HTTP
+    // 429 -- this Discovery-based API can also report it as a 403, an
+    // older Google API convention that predates 429 being a standard
+    // status code. Detect that case by response content, not just status,
+    // so it gets the same retry-with-backoff treatment a real 429 gets
+    // instead of failing the sync outright after a couple hundred
+    // milliseconds of generic-error backoff.
+    if (res.status === 403 && isQuotaExceededBody(body)) err.rateLimited = true;
+    throw err;
   }
 
   // messages.batchModify (and other write endpoints) return an empty body
@@ -44,13 +68,20 @@ async function gmailFetch(path, options = {}, _retriedAuth = false) {
   return text ? JSON.parse(text) : null;
 }
 
-export async function withRetry(fn, attempts = 4) {
+export async function withRetry(fn, attempts = 6) {
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
       return await fn();
     } catch (err) {
       if (attempt === attempts) throw err;
-      const backoffMs = (err.rateLimited ? 1000 : 300) * attempt;
+      // A per-*minute* quota (see the Gmail API quota section of
+      // CLAUDE.md) needs real time to free back up -- growing the
+      // rate-limited backoff toward roughly a minute across the retry
+      // attempts gives it a realistic chance to recover, where the old
+      // flat ~1s-per-attempt backoff (max ~6s total) never could. A
+      // non-rate-limited error is likely a genuine failure rather than a
+      // transient quota bump, so it keeps the short backoff.
+      const backoffMs = err.rateLimited ? Math.min(2 ** attempt * 2000, 20000) : 300 * attempt;
       await new Promise((resolve) => setTimeout(resolve, backoffMs));
     }
   }

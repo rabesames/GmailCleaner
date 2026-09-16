@@ -82,12 +82,40 @@ describe('withRetry', () => {
       const fn = vi.fn().mockRejectedValueOnce(rateLimited).mockResolvedValueOnce('ok');
       const promise = withRetry(fn, 4);
 
-      await vi.advanceTimersByTimeAsync(300);
-      expect(fn).toHaveBeenCalledTimes(1); // 300ms isn't enough for the 1000ms rate-limit backoff
+      await vi.advanceTimersByTimeAsync(3999);
+      expect(fn).toHaveBeenCalledTimes(1); // just under the 4000ms rate-limit backoff for attempt 1
 
-      await vi.advanceTimersByTimeAsync(700);
+      await vi.advanceTimersByTimeAsync(1);
       await expect(promise).resolves.toBe('ok');
       expect(fn).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('caps rate-limited backoff at 20s for later attempts', async () => {
+    vi.useFakeTimers();
+    try {
+      const rateLimited = new Error('rate limited');
+      rateLimited.rateLimited = true;
+      const fn = vi
+        .fn()
+        .mockRejectedValueOnce(rateLimited) // attempt 1 -> backoff 4000ms
+        .mockRejectedValueOnce(rateLimited) // attempt 2 -> backoff 8000ms
+        .mockRejectedValueOnce(rateLimited) // attempt 3 -> backoff 16000ms
+        .mockRejectedValueOnce(rateLimited) // attempt 4 -> would be 32000ms uncapped, capped to 20000ms
+        .mockResolvedValueOnce('ok');
+      const promise = withRetry(fn, 5);
+
+      await vi.advanceTimersByTimeAsync(4000 + 8000 + 16000);
+      expect(fn).toHaveBeenCalledTimes(4);
+
+      await vi.advanceTimersByTimeAsync(19999);
+      expect(fn).toHaveBeenCalledTimes(4); // capped at 20000ms, not 2**4*2000 = 32000ms
+
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(promise).resolves.toBe('ok');
+      expect(fn).toHaveBeenCalledTimes(5);
     } finally {
       vi.useRealTimers();
     }
@@ -156,6 +184,86 @@ describe('gmailFetch (via exported callers)', () => {
   it('throws the server error message for other non-ok statuses', async () => {
     fetch.mockResolvedValueOnce(jsonResponse(500, { error: { message: 'server exploded' } }));
     await expect(getMessageMetadata('x')).rejects.toThrow('server exploded');
+  });
+
+  it('treats a 403 with status RESOURCE_EXHAUSTED as rate-limited', async () => {
+    fetch.mockResolvedValueOnce(
+      jsonResponse(403, {
+        error: {
+          status: 'RESOURCE_EXHAUSTED',
+          message:
+            "Quota exceeded for quota metric 'Total Query Cost' and limit 'Units per minute per user' of service 'gmail.googleapis.com' for consumer 'project_number:123'.",
+        },
+      })
+    );
+    let caught;
+    try {
+      await getMessageMetadata('x');
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught.rateLimited).toBe(true);
+    expect(caught.message).toContain('Quota exceeded');
+  });
+
+  it('treats a 403 with reason rateLimitExceeded/quotaExceeded as rate-limited', async () => {
+    fetch.mockResolvedValueOnce(jsonResponse(403, { error: { errors: [{ reason: 'quotaExceeded' }], message: 'over quota' } }));
+    let caught;
+    try {
+      await getMessageMetadata('x');
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught.rateLimited).toBe(true);
+  });
+
+  it('treats a 403 whose message mentions quota as rate-limited even without a structured reason', async () => {
+    fetch.mockResolvedValueOnce(jsonResponse(403, { error: { message: 'Quota exceeded for something' } }));
+    let caught;
+    try {
+      await getMessageMetadata('x');
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught.rateLimited).toBe(true);
+  });
+
+  it('does not treat an unrelated 403 as rate-limited', async () => {
+    fetch.mockResolvedValueOnce(
+      jsonResponse(403, { error: { errors: [{ reason: 'insufficientPermissions' }], message: 'Insufficient Permission' } })
+    );
+    let caught;
+    try {
+      await getMessageMetadata('x');
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught.rateLimited).toBeFalsy();
+    expect(caught.message).toBe('Insufficient Permission');
+  });
+
+  it('does not treat a 403 with no usable reason or message as rate-limited', async () => {
+    fetch.mockResolvedValueOnce(jsonResponse(403, { error: { errors: [{}] } }));
+    let caught;
+    try {
+      await getMessageMetadata('x');
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught.rateLimited).toBeFalsy();
+    expect(caught.message).toBe('Gmail API error (403)');
+  });
+
+  it('does not treat an unparseable 403 body as rate-limited', async () => {
+    fetch.mockResolvedValueOnce(unparsableErrorResponse(403));
+    let caught;
+    try {
+      await getMessageMetadata('x');
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught.rateLimited).toBeFalsy();
+    expect(caught.message).toBe('Gmail API error (403)');
   });
 
   it('falls back to a generic message when the error body is not parseable JSON', async () => {
