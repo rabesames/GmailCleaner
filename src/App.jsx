@@ -13,6 +13,7 @@ import {
 } from './lib/store.js';
 import { startSync, pauseSync, resumeSync, resetSync, getSyncSnapshot } from './lib/sync.js';
 import { trashMessages } from './lib/gmailApi.js';
+import { APP_VERSION } from './lib/version.js';
 import AuthControls from './components/AuthControls.jsx';
 import SyncControls from './components/SyncControls.jsx';
 import SendersSection from './components/SendersSection.jsx';
@@ -79,6 +80,12 @@ export default function App() {
   useEffect(() => {
     refreshAll();
   }, [refreshAll]);
+
+  // Runs once -- APP_VERSION is a build-time constant (see lib/version.js),
+  // not app state, so there's nothing to re-run this for.
+  useEffect(() => {
+    document.title = `Gmail Cleaner v${APP_VERSION}`;
+  }, []);
 
   const handleClientIdChange = (value) => {
     setClientId(value);
